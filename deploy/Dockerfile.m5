@@ -1,0 +1,15 @@
+FROM python:3.11-slim-bookworm
+COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /usr/local/bin/uv
+RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-cache
+COPY backend/m5/ backend/m5/
+ENV PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH" \
+    M5_MODEL=/models/m5 M5_LISTEN=[::]:50051 M5_TEXT_NORMALIZATION=off
+RUN python -m unittest discover -s backend/m5 -t . -p 'test_*.py' -v
+EXPOSE 50051
+HEALTHCHECK --interval=10s --timeout=8s --start-period=120s --retries=3 \
+    CMD ["python", "-m", "backend.m5.healthcheck"]
+ENTRYPOINT ["python", "-m", "backend.m5.server"]

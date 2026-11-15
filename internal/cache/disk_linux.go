@@ -2,6 +2,7 @@ package cache
 
 import (
 	"errors"
+	"os"
 	"syscall"
 )
 
@@ -14,4 +15,13 @@ func diskAvailable(path string, required int64) error {
 		return errors.New("磁盘空间不足")
 	}
 	return nil
+}
+
+func syncDirectory(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }

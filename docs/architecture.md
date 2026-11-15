@@ -2,6 +2,8 @@
 
 ## 模块边界
 
+新增 M5 使用 `engine.Backend` 复用相同的 HTTP 与缓存层，经 gRPC 服务端流连接独立 CPU 推理服务。下图保留 Qwen 路径，M5 的协议、目录与并发约束见 [M5 CPU 后端](m5.md)。
+
 ```mermaid
 flowchart LR
   U[客户端] --> H[Go HTTP 接口]

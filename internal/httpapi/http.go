@@ -131,7 +131,7 @@ func resolve(req *engine.Request, info *engine.Info) (int, string) {
 
 type Handler struct {
 	c     config.Config
-	b     *engine.Client
+	b     engine.Backend
 	cache *cache.Store
 }
 
@@ -351,7 +351,7 @@ func (g *Handler) speech(w http.ResponseWriter, r *http.Request, asSSE bool, tra
 	}
 }
 
-func New(c config.Config, b *engine.Client, store *cache.Store) *Handler {
+func New(c config.Config, b engine.Backend, store *cache.Store) *Handler {
 	return &Handler{c, b, store}
 }
 func sortedVoices(info *engine.Info) []string {

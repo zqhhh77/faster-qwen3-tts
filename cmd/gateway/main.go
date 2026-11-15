@@ -33,7 +33,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	b := engine.New(c)
+	b, err := engine.Open(c)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer b.Close()
 	store, err := cache.New(c, b.Generate)
 	if err != nil {
 		log.Fatal(err)

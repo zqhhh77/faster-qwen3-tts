@@ -22,3 +22,22 @@ func TestQueueZeroUnitsAndInvalidConfig(t *testing.T) {
 		t.Fatal("accepted invalid backend address")
 	}
 }
+
+func TestM5Config(t *testing.T) {
+	t.Setenv("TTS_BACKEND_TYPE", "m5")
+	t.Setenv("TTS_MAX_CONCURRENT_TASKS", "")
+	t.Setenv("TTS_BACKEND_GRPC_ADDR", "127.0.0.1:50051")
+	c, err := Load()
+	if err != nil || c.Concurrency != 1 {
+		t.Fatalf("config=%+v err=%v", c, err)
+	}
+	t.Setenv("TTS_MAX_CONCURRENT_TASKS", "33")
+	if _, err := Load(); err == nil {
+		t.Fatal("accepted unsafe M5 concurrency")
+	}
+	t.Setenv("TTS_MAX_CONCURRENT_TASKS", "1")
+	t.Setenv("TTS_BACKEND_GRPC_ADDR", "http://localhost:50051")
+	if _, err := Load(); err == nil {
+		t.Fatal("accepted invalid gRPC address")
+	}
+}

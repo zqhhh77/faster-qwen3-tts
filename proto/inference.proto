@@ -1,0 +1,37 @@
+syntax = "proto3";
+package tts.inference.v1;
+option go_package = "tts/internal/engine/pb";
+
+service InferenceService {
+  rpc GetInfo(GetInfoRequest) returns (ModelInfo);
+  rpc Synthesize(SynthesizeRequest) returns (stream SynthesizeEvent);
+}
+message GetInfoRequest {}
+message ModelInfo {
+  string identity = 1;
+  string model = 2;
+  repeated string voices = 3;
+  string default_voice = 4;
+  repeated string languages = 5;
+  uint32 sample_rate = 6;
+  uint32 channels = 7;
+  string sample_format = 8;
+  uint32 concurrency = 9;
+  bool supports_instruct = 10;
+  bool text_normalization = 11;
+}
+message SynthesizeRequest {
+  string input = 1;
+  string voice = 2;
+  string language = 3;
+  string instruct = 4;
+  double speed = 5;
+  string expected_identity = 6;
+}
+message SynthesizeEvent {
+  oneof event {
+    bytes audio = 1;
+    Completion done = 2;
+  }
+}
+message Completion { uint64 samples = 1; }

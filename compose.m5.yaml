@@ -1,0 +1,51 @@
+services:
+  m5-backend:
+    image: ${TTS_IMAGE_PREFIX:-tts}-m5:${TTS_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.m5
+    restart: unless-stopped
+    environment:
+      M5_MODEL: /models/m5
+      M5_THREADS: ${M5_THREADS:-2}
+      M5_WORKERS: ${M5_WORKERS:-1}
+      M5_MAX_FRAMES: ${M5_MAX_FRAMES:-1024}
+      M5_DEFAULT_VOICE: ${M5_DEFAULT_VOICE:-default}
+      M5_VOICES_FILE: ${M5_VOICES_FILE:-/app/backend/m5/voices.json}
+    volumes:
+      - ${M5_MODEL_HOST_DIR:-./models/M5-TTS-50M-ONNX}:/models/m5:ro
+      - ./references:/references:ro
+    expose: ["50051"]
+    stop_grace_period: 15s
+
+  gateway:
+    image: ${TTS_IMAGE_PREFIX:-tts}-gateway:${TTS_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.gateway
+    restart: unless-stopped
+    depends_on:
+      m5-backend:
+        condition: service_healthy
+    ports:
+      - "${TTS_BIND_ADDRESS:-127.0.0.1}:${TTS_PORT:-8000}:8000"
+    environment:
+      TTS_BACKEND_TYPE: m5
+      TTS_BACKEND_GRPC_ADDR: m5-backend:50051
+      TTS_CACHE_DIR: /cache/audio
+      TTS_MAX_CONCURRENT_TASKS: ${M5_WORKERS:-1}
+      TTS_MAX_PENDING_TASKS: ${TTS_MAX_PENDING_TASKS:-8}
+      TTS_MAX_READERS: ${TTS_MAX_READERS:-256}
+      TTS_CACHE_MAX_MB: ${TTS_CACHE_MAX_MB:-256}
+      TTS_CACHE_TTL_SECONDS: ${TTS_CACHE_TTL_SECONDS:-300}
+      TTS_TASK_TIMEOUT_SECONDS: ${TTS_TASK_TIMEOUT_SECONDS:-120}
+      TTS_SEND_TIMEOUT_SECONDS: ${TTS_SEND_TIMEOUT_SECONDS:-15}
+      TTS_CACHE_CLEANUP_SECONDS: ${TTS_CACHE_CLEANUP_SECONDS:-5}
+    volumes:
+      - ${TTS_CACHE_HOST_DIR:-./cache}:/cache
+    healthcheck:
+      test: ["CMD", "/gateway", "healthcheck"]
+      interval: 10s
+      timeout: 9s
+      retries: 3
+    stop_grace_period: 15s

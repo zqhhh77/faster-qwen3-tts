@@ -1,0 +1,87 @@
+name: M5 CPU and gateway images
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, feat/vllm-omni-backend]
+    paths:
+      - .github/workflows/m5-images.yml
+      - .dockerignore
+      - go.mod
+      - go.sum
+      - cmd/**
+      - internal/**
+      - proto/**
+      - backend/m5/**
+      - pyproject.toml
+      - uv.lock
+      - compose.m5.yaml
+      - deploy/Dockerfile.gateway
+      - deploy/Dockerfile.m5
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m5-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [m5, gateway]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image tags
+        id: tags
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-${{ matrix.service }}"
+          echo "sha=$image:sha-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: deploy/Dockerfile.${{ matrix.service }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish matched pair
+        run: |
+          prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tag=m5
+          if [ "$GITHUB_REF" = refs/heads/main ]; then tag=latest; fi
+          for service in m5 gateway; do
+            docker buildx imagetools create --tag "$prefix-$service:$tag" "$prefix-$service:sha-$GITHUB_SHA"
+          done
+          echo "M5 CPU + gateway ready: TTS_IMAGE_TAG=sha-$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"

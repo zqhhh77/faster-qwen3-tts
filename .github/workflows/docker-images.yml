@@ -1,17 +1,6 @@
 name: Docker images
 
 on:
-  push:
-    branches: [main, feat/vllm-omni-backend]
-    paths:
-      - .github/workflows/docker-images.yml
-      - .dockerignore
-      - go.mod
-      - cmd/**
-      - internal/**
-      - backend/**
-      - compose*.yaml
-      - deploy/Dockerfile.*
   workflow_dispatch:
 
 permissions:

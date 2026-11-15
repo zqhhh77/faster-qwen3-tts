@@ -180,12 +180,7 @@ func persist(r *Record) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return syncDirectory(filepath.Dir(path))
 }
 
 func (c *Store) removeLocked(r *Record) {

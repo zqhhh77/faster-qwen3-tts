@@ -84,3 +84,7 @@ curl -N http://127.0.0.1:8000/v1/audio/speech/sse \
 ## 当前范围
 
 一个 backend 部署加载一个模型，选择 CustomVoice 或 Base。Base 当前用于参考音色克隆，不接受 instruct。VoiceDesign 和在线上传音色未开放。如需不同模型并存，应分别部署服务与缓存目录。
+
+## M5 参考音色
+
+M5 的命名参考录音、默认音色和列表查询沿用现有接口，配置方式见 [M5 CPU 后端](m5.md#模型与音色)。

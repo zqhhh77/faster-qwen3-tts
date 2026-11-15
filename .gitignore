@@ -16,3 +16,4 @@ __pycache__/
 .vscode/
 /gateway/
 /bin/
+/third_party/

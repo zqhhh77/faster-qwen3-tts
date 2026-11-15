@@ -1,10 +1,16 @@
 **
 !go.mod
+!go.sum
+!pyproject.toml
+!uv.lock
 !cmd/
 !cmd/**
 !internal/
 !internal/**
 !backend/
 !backend/launch.py
+!backend/m5/
+!backend/m5/**
+backend/m5/**/__pycache__/
 !deploy/
 !deploy/Dockerfile.*
