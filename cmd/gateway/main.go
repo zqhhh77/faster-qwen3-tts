@@ -57,7 +57,7 @@ func main() {
 			_ = srv.Close()
 		}
 	}()
-	log.Printf("Go 网关监听 %s，推理并发 %d，等待上限 %d", c.Addr, c.Concurrency, c.Pending)
+	log.Printf("tdt-tts 流式网关监听 %s，推理并发 %d，等待上限 %d", c.Addr, c.Concurrency, c.Pending)
 	err = srv.ListenAndServe()
 	stop()
 	<-finished

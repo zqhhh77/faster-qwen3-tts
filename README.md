@@ -1,6 +1,6 @@
-# TTS 流式网关（Qwen3 / M5）
+# tdt-tts 流式网关
 
-Go 网关支持既有 Qwen3-TTS/vLLM-Omni 后端，以及新增 M5 ONNX CPU gRPC 后端；每次部署启用一个模型。两者共用现有 HTTP 接口、命名音色、增量音频、共享生成与磁盘缓存。M5 的部署、本地 uv 环境及音色配置见 [M5 CPU 使用说明](docs/m5.md)。
+tdt-tts 支持 Qwen3-TTS（vLLM-Omni）和 M5（ONNX Runtime CPU / gRPC），每次部署选择一个模型后端。两者共用 HTTP 接口、命名音色、增量音频、共享生成与磁盘缓存。M5 的部署、本地 uv 环境及音色配置见 [M5 CPU 使用说明](docs/m5.md)。
 
 M5 支持在目标机器运行 `uv run --frozen python -m backend.m5.tune --concurrency N`，自动对比 workers/threads，并输出吞吐、P95 延迟、进程树内存及推荐配置；也可直接在 CPU 镜像中运行。用法见 [一键调优](docs/m5.md#一键寻找-workers--threads-组合)。
 
@@ -27,13 +27,13 @@ compose.images.yaml    拉取已发布镜像部署
 
 Go 测试与实现放在同一包中；模块名为 `tts`。Go 通过标准 HTTP 接入 Qwen，通过 gRPC/protobuf 接入 M5。`backend/launch.py` 保留 Qwen 启动逻辑，`backend/m5/` 提供独立 CPU 推理服务，`compose.m5.yaml` 部署 M5 与同一个网关。
 
-## 快速部署
+## Qwen3-TTS 后端快速部署
 
 准备 NVIDIA 驱动、NVIDIA Container Toolkit、Docker Engine 和支持 `gpus: all` 的 Docker Compose v2.30+。GPU/驱动需要兼容固定的官方 vLLM-Omni 镜像；请按 [部署文档](docs/deployment.md) 做启动检查。
 
 ```bash
-git clone -b feat/vllm-omni-backend <你的仓库地址> qwen3-tts
-cd qwen3-tts
+git clone -b feat/vllm-omni-backend <你的仓库地址> tdt-tts
+cd tdt-tts
 cp .env.example .env
 # 编辑 .env，将 TTS_IMAGE_PREFIX 填为实际镜像前缀，例如 ghcr.io/owner/repo（全部小写）。
 mkdir -p cache references /data/qwen3-tts/models

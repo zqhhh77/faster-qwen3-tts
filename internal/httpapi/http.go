@@ -185,7 +185,7 @@ func (g *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "/" {
-		reply(w, 200, "Qwen3-TTS 流式网关", map[string]string{"health": "/health", "voices": "/v1/audio/voices", "speech": "/v1/audio/speech", "speech_sse": "/v1/audio/speech/sse"})
+		reply(w, 200, "tdt-tts 流式网关", map[string]string{"health": "/health", "voices": "/v1/audio/voices", "speech": "/v1/audio/speech", "speech_sse": "/v1/audio/speech/sse"})
 		return
 	}
 	if method == "POST" {

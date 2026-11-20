@@ -1,4 +1,4 @@
-# HTTP API
+# tdt-tts 流式网关 HTTP API
 
 网关默认地址为 `http://127.0.0.1:8000`。只有 gateway 对外提供接口，vLLM 或 M5 gRPC 服务留在容器网络。服务端选择后端，客户端不传 model；接口和音频协议保持一致。M5 运行与音色配置见 [M5 CPU 后端](m5.md)。
 
@@ -12,7 +12,7 @@ code 与 HTTP 状态码一致，message 为中文。列表返回顶层 rows，�
 
 ## 查询
 
-- `GET /`：接口入口。
+- `GET /`：返回网关名称 `tdt-tts 流式网关` 及各接口路径。
 - `GET /health`：推理健康状态、模型身份、音色信息、缓存条目数、reader 数、未完成任务数、running_tasks、pending_tasks 和缓存预算占用。
 - `GET /v1/audio/voices`：音色列表。每项有 voice、type、default。
 

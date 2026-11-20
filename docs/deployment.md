@@ -1,11 +1,11 @@
-# Linux 部署
+# tdt-tts 流式网关 Linux 部署（Qwen3-TTS 后端）
 
 ## 需要上传的文件
 
 直接使用镜像时，只需要：
 
 ```text
-/data/qwen3-tts/service/
+/data/tdt-tts/service/
   compose.images.yaml
   .env
   references/             # CustomVoice 可为空，Base 放录音、转写和 voices.json
