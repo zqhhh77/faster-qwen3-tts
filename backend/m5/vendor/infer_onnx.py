@@ -7,6 +7,7 @@ Use --device cuda --device-id 0 for NVIDIA GPU inference with the same ONNX weig
 The default Hugging Face ID is the intended upload target, not proof of publication.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 from math import gcd
@@ -153,6 +154,7 @@ class M5Onnx:
         options.add_session_config_entry("session.inter_op.allow_spinning", "0")
         self.sessions = {}
         for name in ("backbone", "depth_frame", "codec_encoder", "codec_decoder"):
+            options.enable_cpu_mem_arena = not (name == "codec_encoder" and self.meta.get("depth_frame_precision") == "int8")
             suffix = "_cached" if name == "codec_decoder" and codec_mode == "cached" else ""
             self.sessions[name] = create_session(self.root / f"{name}{suffix}.onnx", options, providers, self.provider)
         self.session_providers = {name: session.get_providers() for name, session in self.sessions.items()}
@@ -193,8 +195,14 @@ class M5Onnx:
         self.codec_offset += codes.shape[-1]
         return pcm.reshape(-1)
 
+    def prepare_decoder_prefix(self, reference_codes):
+        self._reset_codec()
+        self._decode(reference_codes)
+        return self.codec_offset, self.codec_past, self.codec_states
+
     def generate(self, text, prompt_wav, prompt_text, *, lang="Chinese", seed=1234, max_frames=500,
-                 stream=False, first_frames=4, chunk_frames=4, left_context=8):
+                 stream=False, first_frames=4, chunk_frames=4, left_context=8,
+                 reference_codes=None, decoder_prefix=None):
         """Yield 24kHz float32 PCM. This is generation streaming, not audio playback."""
         if not isinstance(text, str) or not text.strip() or not isinstance(prompt_text, str) or not prompt_text.strip():
             raise ValueError("Target text and accurate reference transcript are required")
@@ -204,14 +212,16 @@ class M5Onnx:
         original_text = text
         text = normalize_text(text, lang=lang)
         sentence = conditioned_text(prompt_text.strip() + text.strip(), lang)
-        audio = read_reference(prompt_wav, self.sample_rate)
-        self.stats = {"status": "running", "provider": self.provider, "precision": "fp32",
+        precision = "mixed-int8-fp32" if self.meta.get("depth_frame_precision") == "int8" else "fp32"
+        self.stats = {"status": "running", "provider": self.provider, "precision": precision,
                       "device": self.device, "device_id": self.device_id if self.device == "cuda" else None,
                       "session_providers": self.session_providers, "provider_options": self.provider_options,
                       "cuda_use_tf32": False if self.device == "cuda" else None,
                       "original_text": original_text, "normalized_text": text}
         started = time.perf_counter()
-        prompt = self.encode_reference(audio)
+        prompt = reference_codes
+        if prompt is None:
+            prompt = self.encode_reference(read_reference(prompt_wav, self.sample_rate))
         ids = np.array(self.tokenizer.encode(sentence).ids)
         prefix = self.audio_embeddings[prompt + 1 + self.offsets].sum(axis=1)
         hidden = np.concatenate((self.text_embeddings[ids], prefix), axis=0)[None]
@@ -219,52 +229,65 @@ class M5Onnx:
             raise ValueError("Reference plus text and generation budget exceed the model context length")
         past = np.empty((self.meta["layers"], 2, 1, self.meta["kv_heads"], 0, self.meta["head_dim"]), np.float32)
         positions = np.arange(hidden.shape[1], dtype=np.int64)[None]
-        if self.codec_mode == "cached":
-            self._reset_codec()
         codec_start = max(0, len(prompt) - left_context) if stream else 0
+        if decoder_prefix is not None:
+            if not stream or self.codec_mode != "cached" or decoder_prefix[0] != len(prompt) - codec_start:
+                raise ValueError("Decoder prefix does not match the streaming reference context")
+            self.codec_offset, self.codec_past, self.codec_states = decoder_prefix
+        elif self.codec_mode == "cached":
+            self._reset_codec()
         rng = np.random.default_rng(seed)
-        generated = []
         generated_buffer = np.empty((max_frames, 16), np.int64)
+        generated = 0
         decoded, emitted = 0, 0
         pending = np.empty(0, np.float32)
         first_pcm_s, eos = None, False
 
-        def decode_new():
+        def decode_new(end):
             nonlocal decoded
             new_start = len(prompt) + decoded
             window_start = max(0, new_start - left_context) if stream else 0
             if self.codec_mode == "cached":
                 cache_start = codec_start + self.codec_offset
-                total_end = len(prompt) + len(generated)
+                total_end = len(prompt) + end
                 new_prompt = prompt[cache_start:min(total_end, len(prompt))]
-                new_generated = generated_buffer[max(cache_start, len(prompt)) - len(prompt):len(generated)]
+                new_generated = generated_buffer[max(cache_start, len(prompt)) - len(prompt):end]
                 new_codes = np.concatenate((new_prompt, new_generated), axis=0)
                 pcm = np.concatenate([self._decode(new_codes[i:i + 32]) for i in range(0, len(new_codes), 32)])
                 window_start = cache_start
             else:
-                all_codes = np.concatenate((prompt, np.stack(generated)), axis=0)
+                all_codes = np.concatenate((prompt, generated_buffer[:end]), axis=0)
                 if stream:
                     pcm = self._decode(all_codes[window_start:])
                 else:
                     pcm = np.concatenate([self._decode(all_codes[max(0, i - 25):i + 300])[
                         (i - max(0, i - 25)) * self.meta["hop_length"]:] for i in range(0, len(all_codes), 300)])
-            decoded = len(generated)
+            decoded = end
             return pcm[(new_start - window_start) * self.meta["hop_length"]:]
 
-        for index in range(max_frames):
-            last, past = self.sessions["backbone"].run(None, dict(hidden=hidden, positions=positions, past=past))
-            noise = rng.exponential(size=(16, 1, self.meta["audio_vocab"])).astype(np.float32)
-            noise = np.maximum(noise, np.finfo(np.float32).tiny)
-            codes, hidden = self.sessions["depth_frame"].run(None, dict(hidden=last, noise=noise,
-                                                                       allow_eos=np.array([index > self.meta["min_frames"]])))
-            if np.all(codes == 0):
-                eos = True
-                break
-            generated.append(np.clip(codes[0] - 1, 0, 2047))
-            generated_buffer[index] = generated[-1]
-            positions = positions[:, -1:] + 1
-            if stream and len(generated) - decoded >= (first_frames if decoded == 0 else chunk_frames):
-                pending = np.concatenate((pending, decode_new()))
+        def generate_batch(frames):
+            nonlocal generated, eos, past, hidden, positions
+            for index in range(generated, min(max_frames, generated + frames)):
+                last, past = self.sessions["backbone"].run(None, dict(hidden=hidden, positions=positions, past=past))
+                noise = rng.exponential(size=(16, 1, self.meta["audio_vocab"])).astype(np.float32)
+                noise = np.maximum(noise, np.finfo(np.float32).tiny)
+                codes, hidden = self.sessions["depth_frame"].run(None, dict(hidden=last, noise=noise,
+                                                                           allow_eos=np.array([index > self.meta["min_frames"]])))
+                if np.all(codes == 0):
+                    eos = True
+                    break
+                generated_buffer[index] = np.clip(codes[0] - 1, 0, 2047)
+                generated += 1
+                positions = positions[:, -1:] + 1
+            return generated
+
+        executor = ThreadPoolExecutor(max_workers=1) if decoder_prefix is not None else None
+        try:
+            end = generate_batch(first_frames if stream else max_frames)
+            while decoded < end:
+                last_batch = eos or end == max_frames
+                ahead = executor.submit(generate_batch, chunk_frames) if executor and not last_batch else None
+                pending = np.concatenate((pending, decode_new(end)))
                 if len(pending) > 2400:
                     pcm, pending = pending[:-2400], pending[-2400:]
                     if not np.isfinite(pcm).all():
@@ -273,19 +296,16 @@ class M5Onnx:
                         first_pcm_s = time.perf_counter() - started
                     emitted += len(pcm)
                     yield pcm
-        if len(generated) > decoded:
-            pending = np.concatenate((pending, decode_new()))
-        if len(pending) > 2400:
-            pcm = pending[:-2400]
-            if not np.isfinite(pcm).all():
-                raise RuntimeError("Codec returned non-finite PCM")
-            if first_pcm_s is None:
-                first_pcm_s = time.perf_counter() - started
-            emitted += len(pcm)
-            yield pcm
-        self.generated_codes = np.stack(generated) if generated else np.empty((0, 16), np.int64)
+                if last_batch:
+                    break
+                end = ahead.result() if ahead is not None else generate_batch(chunk_frames)
+        finally:
+            if executor is not None:
+                # Finish at most one in-flight batch before the worker can serve another voice.
+                executor.shutdown(wait=True, cancel_futures=True)
+        self.generated_codes = generated_buffer[:generated].copy()
         elapsed = time.perf_counter() - started
-        self.stats.update(status="complete" if eos else "truncated", frames=len(generated), eos=eos,
+        self.stats.update(status="complete" if eos else "truncated", frames=generated, eos=eos,
                           truncated=not eos, audio_s=emitted / self.sample_rate, elapsed_s=elapsed,
                           rtf=elapsed / (emitted / self.sample_rate) if emitted else None,
                           first_pcm_s=first_pcm_s, threads=self.threads, codec_mode=self.codec_mode,

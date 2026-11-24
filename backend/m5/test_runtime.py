@@ -14,20 +14,31 @@ from backend.m5.runtime import Runtime, pcm16, verify_bundle
 
 class FakeModel:
     sample_rate = 24000
-    meta = {"max_sequence": 2048, "min_frames": 6}
+    meta = {"max_sequence": 2048, "min_frames": 6, "depth_frame_precision": "int8"}
     tokenizer = SimpleNamespace(encode=lambda text: SimpleNamespace(ids=[1, 2]))
 
     def __init__(self):
         self.encodes = 0
         self.truncated = False
         self.resets = 0
+        self.prefixes = []
+        self.used = []
 
     def encode_reference(self, audio):
         self.encodes += 1
-        return np.zeros((3, 16), dtype=np.int64)
+        return np.full((12, 16), self.encodes, dtype=np.int64)
+
+    def prepare_decoder_prefix(self, codes):
+        if codes.shape != (8, 16):
+            raise AssertionError("unexpected reference context")
+        self.prefixes.append(object())
+        return self.prefixes[-1]
 
     def generate(self, *args, **kwargs):
-        self.encode_reference(np.zeros(1))
+        voice = int(kwargs["reference_codes"][0, 0])
+        if kwargs["decoder_prefix"] is not self.prefixes[voice - 1]:
+            raise AssertionError("wrong voice decoder prefix")
+        self.used.append(voice)
         yield np.array([0.1, -0.1], np.float32)
         self.stats = {"eos": not self.truncated, "truncated": self.truncated}
 
@@ -53,15 +64,19 @@ class RuntimeTests(unittest.TestCase):
                 runtime = Runtime()
                 self.assertEqual(model.encodes, 2)
                 self.assertEqual(runtime.default_voice, "b")
+                interrupted = runtime.generate("text", "b", "Chinese")
+                next(interrupted)
+                interrupted.close()
                 for name in ("a", "b", "a"):
                     self.assertTrue(list(runtime.generate("text", name, "Chinese")))
+                self.assertEqual(model.used, [2, 1, 2, 1])
                 self.assertEqual(model.encodes, 2)
                 self.assertEqual(model.encode_reference, original_encode)
                 model.truncated = True
                 with self.assertRaises(RuntimeError):
                     list(runtime.generate("text", "a", "Chinese"))
                 self.assertEqual(model.encode_reference, original_encode)
-                self.assertEqual(model.resets, 4)
+                self.assertEqual(model.resets, 5)
 
     def test_pcm16_clips_and_rejects_nonfinite(self):
         values = np.frombuffer(pcm16(np.array([-2, -1, 0, 1, 2], np.float32)), dtype="<i2")

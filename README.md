@@ -2,6 +2,8 @@
 
 tdt-tts 支持 Qwen3-TTS（vLLM-Omni）和 M5（ONNX Runtime CPU / gRPC），每次部署选择一个模型后端。两者共用 HTTP 接口、命名音色、增量音频、共享生成与磁盘缓存。M5 的部署、本地 uv 环境及音色配置见 [M5 CPU 使用说明](docs/m5.md)。
 
+M5 的 Compose 默认采用 CPU 双路流式配置，每个实例使用 3 个 ONNX 线程。首次启动前需准备仅量化 `depth_frame` 的 INT8 模型目录。转换命令见 [CPU 双路流式合成](docs/m5.md#cpu-双路流式合成)。
+
 M5 支持在目标机器运行 `uv run --frozen python -m backend.m5.tune --concurrency N`，自动对比 workers/threads，并输出吞吐、P95 延迟、进程树内存及推荐配置；也可直接在 CPU 镜像中运行。用法见 [一键调优](docs/m5.md#一键寻找-workers--threads-组合)。
 
 推理镜像固定为 vLLM-Omni v0.28.0 官方发布版及其摘要。旧 faster 推理框架、Python 网关、GGML、Gradio 和 Python 包发布流程已移除。
