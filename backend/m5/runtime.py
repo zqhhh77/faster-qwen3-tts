@@ -99,11 +99,12 @@ class Runtime:
         if self.default_voice not in self.voices:
             raise ValueError("默认音色不在配置列表中")
         phrase_mode = os.environ.get("M5_ALERT_PHRASES", "on")
-        if phrase_mode not in ("on", "off"):
-            raise ValueError("M5_ALERT_PHRASES 必须为 on 或 off")
+        if phrase_mode not in ("on", "off", "merged"):
+            raise ValueError("M5_ALERT_PHRASES 必须为 on、off 或 merged")
+        self.alert_mode = phrase_mode
         self.alert_phrases = {}
         self.field_cache = None
-        if phrase_mode == "on":
+        if phrase_mode != "off":
             cache_mb = int(os.environ.get("M5_ALERT_FIELD_CACHE_MB", "0"))
             if cache_mb < 0:
                 raise ValueError("M5_ALERT_FIELD_CACHE_MB 必须为非负整数")
@@ -128,21 +129,22 @@ class Runtime:
                                                for name in ("pynini", "WeTextProcessing")}
         self.identity = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         self.model_name = root.name
-        logging.info("M5 CPU 已就绪 identity=%s voices=%s normalization=%s",
-                     self.identity, list(self.voices), self.normalization)
+        logging.info("M5 CPU 已就绪 identity=%s voices=%s normalization=%s alert_phrases=%s",
+                     self.identity, list(self.voices), self.normalization, self.alert_mode)
 
     def _prepare_alert_phrases(self):
         result = {}
+        selected = ("发现", *ALERT_ENDINGS) if self.alert_mode == "merged" else ALERT_PHRASES
         for voice, spec in self.voices.items():
             phrases = {}
-            for phrase in ALERT_PHRASES:
+            for phrase in selected:
                 text = phrase + "。" if phrase in ALERT_ENDINGS else phrase
                 budget = min(1024, self._frame_budget(text, spec, "Chinese"))
                 pcm = b"".join(self._generate_text(text, spec, "Chinese", budget))
                 pcm = b"".join(trim_alert_edges([pcm], silence_threshold(pcm)))
                 phrases[phrase] = (pcm, self.model.stats["frames"])
             result[voice] = phrases
-            logging.info("告警短语预生成完成 voice=%s phrases=%d", voice, len(phrases))
+            logging.info("告警短语预生成完成 voice=%s phrases=%d mode=%s", voice, len(phrases), self.alert_mode)
         return result
 
     def _frame_budget(self, text, spec, language):
@@ -165,17 +167,26 @@ class Runtime:
             parts = alert_parts(text)
             if parts:
                 subject, kind, ending = parts
-                remaining = budget - sum(phrases[p][1] for p in ("发现", "触发", ending))
-                if remaining > 2 * self.model.meta["min_frames"]:
-                    threshold = silence_threshold(phrases["发现"][0])
-                    frames = yield from self._alert_field(subject, voice, remaining, threshold, phrases["发现"][0])
-                    remaining -= frames
-                    if remaining <= 0:
-                        raise RuntimeError("生成预算耗尽，音频不完整")
-                    yield phrases["触发"][0]
-                    yield from self._alert_field(kind, voice, remaining, threshold)
-                    yield phrases[ending][0]
-                    return
+                if self.alert_mode == "merged":
+                    remaining = budget - phrases["发现"][1] - phrases[ending][1]
+                    if remaining > self.model.meta["min_frames"]:
+                        body = subject + "触发" + kind
+                        prefix = phrases["发现"][0]
+                        yield from self._alert_field(body, voice, remaining, silence_threshold(prefix), prefix)
+                        yield phrases[ending][0]
+                        return
+                else:
+                    remaining = budget - sum(phrases[p][1] for p in ("发现", "触发", ending))
+                    if remaining > 2 * self.model.meta["min_frames"]:
+                        threshold = silence_threshold(phrases["发现"][0])
+                        frames = yield from self._alert_field(subject, voice, remaining, threshold, phrases["发现"][0])
+                        remaining -= frames
+                        if remaining <= 0:
+                            raise RuntimeError("生成预算耗尽，音频不完整")
+                        yield phrases["触发"][0]
+                        yield from self._alert_field(kind, voice, remaining, threshold)
+                        yield phrases[ending][0]
+                        return
         yield from self._generate_text(text, spec, language, budget)
 
     def _alert_field(self, field, voice, remaining, threshold, prefix=b""):
@@ -200,7 +211,7 @@ class Runtime:
                         captured = None
                 if first:
                     first.extend(chunk)
-                    # 船名开头裁掉静音后，攒够 0.8 秒正文再开播。
+                    # 正文开头裁掉静音后，攒够 0.8 秒正文再开播。
                     if len(first) >= 38400:
                         yield bytes(first)
                         first.clear()

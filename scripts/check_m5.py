@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--gateway", default=".cache/gateway.exe" if os.name == "nt" else ".cache/gateway")
     parser.add_argument("--output", default=".cache/m5-check")
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--text", default="你好，欢迎使用语音合成服务。", help="真实模型检查使用的正文")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     output = (root / args.output).resolve()
@@ -82,7 +83,7 @@ def main():
                 voices = json.load(response)
             assert voices["rows"] == [{"voice": "alternate", "type": "Base", "default": False},
                                        {"voice": "default", "type": "Base", "default": True}], voices
-            request = {"input": "你好，欢迎使用语音合成服务。"}
+            request = {"input": args.text}
 
             def framed(voice=None):
                 payload = dict(request)
@@ -156,7 +157,7 @@ def main():
                           cache_first_audio_s=cached[1], audio_s=len(a[0])/48000,
                           shared_requests=2, preloaded_voices_per_worker=2, workers=args.workers, inference_runs=2,
                           transports=["pcm_framed", "pcm", "sse"],
-                          identity=health["data"]["backend"]["identity"])
+                          identity=health["data"]["backend"]["identity"], input=args.text)
             (output / "results.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             print(json.dumps(result, ensure_ascii=False, indent=2))
         finally:
