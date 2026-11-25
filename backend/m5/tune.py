@@ -241,7 +241,8 @@ def run_candidate(args, workers, threads, requests, directory, memory_limit):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
-    env = dict(os.environ, M5_MODEL=str(Path(args.model).resolve()), M5_WORKERS=str(workers),
+    # 预热和多轮测量使用相同正文，调线程时每轮都需实际推理动态字段。
+    env = dict(os.environ, M5_ALERT_FIELD_CACHE_MB="0", M5_MODEL=str(Path(args.model).resolve()), M5_WORKERS=str(workers),
                M5_THREADS=str(threads), M5_LISTEN=f"127.0.0.1:{port}", PYTHONUTF8="1", PYTHONUNBUFFERED="1")
     if args.voices:
         env["M5_VOICES_FILE"] = str(Path(args.voices).resolve())
@@ -387,7 +388,7 @@ def main(argv=None):
                   environment=dict(platform=platform.platform(), python=sys.version,
                                    logical_cpus=psutil.cpu_count(), physical_cpus=psutil.cpu_count(logical=False),
                                    detected_cpu_capacity=cpu_capacity()),
-                  scope="独立 gRPC 模型服务；客户端按实例数派发并计入排队时间，不经过 HTTP/磁盘缓存", results=[])
+                  scope="独立 gRPC 模型服务，关闭动态字段缓存。客户端按实例数派发并计入排队时间，不经过 HTTP/磁盘缓存", results=[])
     try:
         for index, (workers, threads) in enumerate(candidates, 1):
             print(f"[{index}/{len(candidates)}] workers={workers}, threads={threads}：加载、预热并测试…", flush=True)

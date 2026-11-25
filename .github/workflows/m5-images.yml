@@ -3,7 +3,7 @@ name: M5 CPU and gateway images
 on:
   workflow_dispatch:
   push:
-    branches: [main, feat/vllm-omni-backend]
+    branches: [main, feat/vllm-omni-backend, feat/m5-cpu-extreme-optimization]
     paths:
       - .github/workflows/m5-images.yml
       - .dockerignore

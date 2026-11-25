@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import closing
 import importlib.metadata
 import json
 import logging
@@ -12,6 +13,8 @@ import sys
 import time
 
 import numpy as np
+
+from .alert_phrases import ALERT_ENDINGS, ALERT_PHRASES, AlertFieldCache, alert_parts, silence_threshold, trim_alert_edges
 
 VENDOR = Path(__file__).with_name("vendor")
 sys.path.insert(0, str(VENDOR))
@@ -50,7 +53,7 @@ def pcm16(chunk) -> bytes:
 
 
 class Runtime:
-    def __init__(self):
+    def __init__(self, *, shared_alert_phrases=None, shared_field_cache=None):
         root = Path(os.environ.get("M5_MODEL", "/models/m5")).resolve(strict=True)
         assets = verify_bundle(root)
         self.threads = int(os.environ.get("M5_THREADS", "2"))
@@ -95,13 +98,27 @@ class Runtime:
         self.default_voice = os.environ.get("M5_DEFAULT_VOICE") or next(iter(self.voices))
         if self.default_voice not in self.voices:
             raise ValueError("默认音色不在配置列表中")
+        phrase_mode = os.environ.get("M5_ALERT_PHRASES", "on")
+        if phrase_mode not in ("on", "off"):
+            raise ValueError("M5_ALERT_PHRASES 必须为 on 或 off")
+        self.alert_phrases = {}
+        self.field_cache = None
+        if phrase_mode == "on":
+            cache_mb = int(os.environ.get("M5_ALERT_FIELD_CACHE_MB", "0"))
+            if cache_mb < 0:
+                raise ValueError("M5_ALERT_FIELD_CACHE_MB 必须为非负整数")
+            if cache_mb:
+                self.field_cache = shared_field_cache or AlertFieldCache(cache_mb * 1024**2)
+            self.alert_phrases = (self._prepare_alert_phrases() if shared_alert_phrases is None
+                                  else shared_alert_phrases)
         identity = {
             "backend": "m5-cpu", "assets": assets, "voices": identity_voices,
             "default_voice": self.default_voice, "threads": self.threads,
             "max_frames": self.max_frames, "settings": self.settings,
-            "normalization": self.normalization,
+            "normalization": self.normalization, "alert_phrases": phrase_mode,
             "source": {str(p.relative_to(Path(__file__).parent)): digest_file(p)
                        for p in (Path(__file__), Path(__file__).with_name("server.py"),
+                                 Path(__file__).with_name("alert_phrases.py"),
                                  VENDOR / "infer_onnx.py", VENDOR / "text_normalization.py")},
             "packages": {name: importlib.metadata.version(name) for name in (
                 "numpy", "onnxruntime", "scipy", "tokenizers", "soundfile")},
@@ -114,14 +131,89 @@ class Runtime:
         logging.info("M5 CPU 已就绪 identity=%s voices=%s normalization=%s",
                      self.identity, list(self.voices), self.normalization)
 
-    def generate(self, text: str, voice: str, language: str):
-        spec = self.voices[voice]
+    def _prepare_alert_phrases(self):
+        result = {}
+        for voice, spec in self.voices.items():
+            phrases = {}
+            for phrase in ALERT_PHRASES:
+                text = phrase + "。" if phrase in ALERT_ENDINGS else phrase
+                budget = min(1024, self._frame_budget(text, spec, "Chinese"))
+                pcm = b"".join(self._generate_text(text, spec, "Chinese", budget))
+                pcm = b"".join(trim_alert_edges([pcm], silence_threshold(pcm)))
+                phrases[phrase] = (pcm, self.model.stats["frames"])
+            result[voice] = phrases
+            logging.info("告警短语预生成完成 voice=%s phrases=%d", voice, len(phrases))
+        return result
+
+    def _frame_budget(self, text, spec, language):
         normalized = text_normalization.normalize_text(text, lang=language)
         ids = self.model.tokenizer.encode(conditioned_text(spec["text"].strip() + normalized.strip(), language)).ids
         available = self.model.meta["max_sequence"] - len(ids) - len(spec["codes"])
         if available <= self.model.meta["min_frames"]:
             raise ValueError("文本和参考音频超出模型上下文容量")
-        budget = min(self.max_frames, available)
+        return available
+
+    def generate(self, text: str, voice: str, language: str):
+        spec = self.voices[voice]
+        budget = min(self.max_frames, self._frame_budget(text, spec, language))
+        phrases = self.alert_phrases.get(voice) if language == "Chinese" else None
+        if phrases:
+            ending_only = text.strip().removesuffix("。").rstrip()
+            if ending_only in ALERT_ENDINGS and phrases[ending_only][1] <= budget:
+                yield phrases[ending_only][0]
+                return
+            parts = alert_parts(text)
+            if parts:
+                subject, kind, ending = parts
+                remaining = budget - sum(phrases[p][1] for p in ("发现", "触发", ending))
+                if remaining > 2 * self.model.meta["min_frames"]:
+                    threshold = silence_threshold(phrases["发现"][0])
+                    frames = yield from self._alert_field(subject, voice, remaining, threshold, phrases["发现"][0])
+                    remaining -= frames
+                    if remaining <= 0:
+                        raise RuntimeError("生成预算耗尽，音频不完整")
+                    yield phrases["触发"][0]
+                    yield from self._alert_field(kind, voice, remaining, threshold)
+                    yield phrases[ending][0]
+                    return
+        yield from self._generate_text(text, spec, language, budget)
+
+    def _alert_field(self, field, voice, remaining, threshold, prefix=b""):
+        spec = self.voices[voice]
+        limit = min(remaining, self._frame_budget(field, spec, "Chinese"))
+        key = (voice, field)
+        cache = self.field_cache
+        entry = cache.get(key) if cache is not None else None
+        if entry is not None and entry[1] <= limit:
+            pcm, frames = entry
+            yield prefix + pcm
+            return frames
+
+        captured = bytearray() if cache is not None else None
+        first = bytearray(prefix)
+        with closing(self._generate_text(field, spec, "Chinese", limit)) as raw:
+            for chunk in trim_alert_edges(raw, threshold):
+                if captured is not None:
+                    if len(captured) + len(chunk) <= cache.max_bytes:
+                        captured.extend(chunk)
+                    else:
+                        captured = None
+                if first:
+                    first.extend(chunk)
+                    # 船名开头裁掉静音后，攒够 0.8 秒正文再开播。
+                    if len(first) >= 38400:
+                        yield bytes(first)
+                        first.clear()
+                else:
+                    yield chunk
+        frames = self.model.stats["frames"]
+        if captured is not None:
+            cache.put(key, bytes(captured), frames)
+        if first:
+            yield bytes(first)
+        return frames
+
+    def _generate_text(self, text, spec, language, budget):
         chunks = self.model.generate(text, spec["wav"], spec["text"], lang=language,
                                      max_frames=budget, stream=True, reference_codes=spec["codes"],
                                      decoder_prefix=spec["decoder_prefix"], **self.settings)

@@ -91,7 +91,9 @@ def main():
     runtimes = []
     for index in range(workers):
         logging.info("加载 M5 CPU 实例 %d/%d", index + 1, workers)
-        runtimes.append(Runtime())
+        phrases = runtimes[0].alert_phrases if runtimes else None
+        fields = runtimes[0].field_cache if runtimes else None
+        runtimes.append(Runtime(shared_alert_phrases=phrases, shared_field_cache=fields))
     server = grpc.server(ThreadPoolExecutor(max_workers=max(4, workers + 2)),
                          maximum_concurrent_rpcs=workers + 16,
                          options=(("grpc.max_receive_message_length", 65536),
