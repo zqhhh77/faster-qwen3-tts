@@ -138,6 +138,8 @@ def resolve_requests(requests, info, voice, language):
 def stream_request(stub, info, text, voice, language, timeout):
     started = time.perf_counter()
     first, samples, done = None, 0, False
+    underruns = 0
+    stall_s = max_stall_s = 0.0
     call = stub.Synthesize(pb.SynthesizeRequest(input=text, voice=voice, language=language,
                             speed=1, expected_identity=info.identity), timeout=timeout)
     try:
@@ -148,8 +150,16 @@ def stream_request(stub, info, text, voice, language, timeout):
             if kind == "audio":
                 if not event.audio or len(event.audio) % 2 or len(event.audio) > 262144:
                     raise ValueError("音频块无效")
+                arrived = time.perf_counter()
                 if first is None:
-                    first = time.perf_counter()
+                    first = arrived
+                else:
+                    # Playback includes all previously received samples and resumes after each gap.
+                    gap = arrived - (first + samples / 24000 + stall_s)
+                    if gap > 0:
+                        underruns += 1
+                        stall_s += gap
+                        max_stall_s = max(max_stall_s, gap)
                 samples += len(event.audio) // 2
             elif kind == "done":
                 if not samples or samples != event.done.samples:
@@ -159,8 +169,9 @@ def stream_request(stub, info, text, voice, language, timeout):
                 raise ValueError("推理事件无效")
         if not done or call.code() != grpc.StatusCode.OK:
             raise ValueError("缺少成功完成标记")
-        return dict(first_at=first, finished_at=time.perf_counter(), audio_s=samples / 24000,
-                    inference_s=time.perf_counter() - started)
+        finished = time.perf_counter()
+        return dict(first_at=first, finished_at=finished, audio_s=samples / 24000,
+                    inference_s=finished - started, underruns=underruns, stall_s=stall_s, max_stall_s=max_stall_s)
     finally:
         call.cancel()
 
@@ -183,7 +194,8 @@ def batch(stub, info, requests, timeout, cancel=None):
             result = stream_request(stub, info, request["input"], request["voice"], request["language"], remaining)
             return dict(ok=True, first_s=result["first_at"] - submitted,
                         complete_s=result["finished_at"] - submitted, queue_s=dispatched - submitted,
-                        audio_s=result["audio_s"], inference_s=result["inference_s"])
+                        audio_s=result["audio_s"], inference_s=result["inference_s"], underruns=result["underruns"],
+                        stall_s=result["stall_s"], max_stall_s=result["max_stall_s"])
         except (grpc.RpcError, ValueError, TimeoutError) as exc:
             return dict(ok=False, error=str(exc))
         finally:
@@ -209,6 +221,9 @@ def summarize(workers, threads, batches, peak_bytes, startup_s):
     wall = sum(item["wall_s"] for item in batches)
     return dict(workers=workers, threads=threads, ok=len(good) == len(rows),
                 successes=len(good), failures=len(rows) - len(good),
+                stalled_requests=sum(row["underruns"] > 0 for row in good),
+                underruns=sum(row["underruns"] for row in good), stall_s=sum(row["stall_s"] for row in good),
+                max_stall_s=max((row["max_stall_s"] for row in good), default=0.0),
                 requests_per_s=len(good) / wall, audio_seconds_per_s=sum(row["audio_s"] for row in good) / wall,
                 first_p95_s=percentile([row["first_s"] for row in good], .95) if good else None,
                 complete_p95_s=percentile([row["complete_s"] for row in good], .95) if good else None,
@@ -216,8 +231,9 @@ def summarize(workers, threads, batches, peak_bytes, startup_s):
                 startup_s=startup_s, batches=batches)
 
 
-def recommend(results):
-    valid = [row for row in results if row.get("ok") and row.get("requests_per_s", 0) > 0]
+def recommend(results, require_continuous=False):
+    valid = [row for row in results if row.get("ok") and row.get("requests_per_s", 0) > 0
+             and (not require_continuous or row.get("underruns") == 0)]
     return min(valid, key=lambda row: (-row["requests_per_s"], row["first_p95_s"], row["peak_rss_mb"])) if valid else None
 
 
@@ -268,7 +284,8 @@ def run_candidate(args, workers, threads, requests, directory, memory_limit):
                         if time.perf_counter() > deadline:
                             raise TimeoutError("模型启动超时")
                         time.sleep(.1)
-                if info.concurrency != workers or info.sample_rate != 24000 or info.sample_format != "s16le":
+                if (info.concurrency != workers or info.sample_rate != 24000 or info.channels != 1
+                        or info.sample_format != "s16le"):
                     raise ValueError("模型服务能力与测试配置不一致")
                 resolved = resolve_requests(requests, info, args.voice, args.language)
                 startup = time.perf_counter() - started
@@ -297,7 +314,8 @@ def run_candidate(args, workers, threads, requests, directory, memory_limit):
 def save_report(directory, report):
     (directory / "results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     fields = ("workers", "threads", "ok", "requests_per_s", "audio_seconds_per_s", "first_p95_s",
-              "complete_p95_s", "batch_mean_s", "peak_rss_mb", "startup_s", "error")
+              "complete_p95_s", "stalled_requests", "underruns", "stall_s", "max_stall_s",
+              "batch_mean_s", "peak_rss_mb", "startup_s", "error")
     with (directory / "results.csv").open("w", newline="", encoding="utf-8-sig") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
@@ -312,6 +330,8 @@ def main(argv=None):
     parser.add_argument("--threads", help="候选算子线程数，如 1,2,3,4；默认自动选择")
     parser.add_argument("--cpu-budget", type=int, default=cpu_capacity(), help="候选 workers×threads 的上限；默认识别 CPU/容器配额")
     parser.add_argument("--rounds", type=int, default=3, help="每组预热后测试轮数，默认 3")
+    parser.add_argument("--require-continuous", action="store_true",
+                        help="只推荐所有正式测试请求都成功且首块即播零中断的组合，无合格组合时返回退出码 1")
     workload = parser.add_mutually_exclusive_group()
     workload.add_argument("--texts", help="UTF-8 文件，一行一条真实业务文本，至少 concurrency 条不同文本")
     workload.add_argument("--requests", help="JSON 任务数组，每项包含 input，可选 voice、language；允许同文本不同音色")
@@ -362,6 +382,7 @@ def main(argv=None):
     print(f"结果目录: {directory}", flush=True)
     print(f"子进程 RSS 预算: {memory_limit / 1024**3:.2f} GiB" if memory_limit else "无法自动识别内存预算，建议显式指定 --max-memory-gb", flush=True)
     report = dict(status="running", concurrency=args.concurrency, rounds=args.rounds, cpu_budget=args.cpu_budget,
+                  require_continuous=args.require_continuous,
                   memory_limit_bytes=memory_limit, requests=requests,
                   environment=dict(platform=platform.platform(), python=sys.version,
                                    logical_cpus=psutil.cpu_count(), physical_cpus=psutil.cpu_count(logical=False),
@@ -375,7 +396,9 @@ def main(argv=None):
             save_report(directory, report)
             if "requests_per_s" in result:
                 print(f"  成功={result['successes']} 失败={result['failures']} 吞吐={result['requests_per_s']:.3f} 请求/秒 "
-                      f"首块P95={result['first_p95_s']}秒 完成P95={result['complete_p95_s']}秒 RSS={result['peak_rss_mb']:.0f}MiB", flush=True)
+                      f"首块P95={result['first_p95_s']}秒 完成P95={result['complete_p95_s']}秒 RSS={result['peak_rss_mb']:.0f}MiB\n"
+                      f"  成功请求中播放中断={result['underruns']} 次，涉及 {result['stalled_requests']} 条请求，"
+                      f"累计 {result['stall_s']:.3f} 秒，最长 {result['max_stall_s']:.3f} 秒", flush=True)
             else:
                 print(f"  跳过: {result['error']}", flush=True)
     except KeyboardInterrupt:
@@ -383,18 +406,19 @@ def main(argv=None):
         save_report(directory, report)
         print("测试已停止，已完成的组保存在报告中。", flush=True)
         return 130
-    best = recommend(report["results"])
+    best = recommend(report["results"], args.require_continuous)
     report.update(status="complete", recommendation={key: best[key] for key in (
-        "workers", "threads", "requests_per_s", "first_p95_s", "complete_p95_s", "peak_rss_mb")} if best else None)
+        "workers", "threads", "requests_per_s", "first_p95_s", "complete_p95_s", "peak_rss_mb", "underruns")} if best else None)
     save_report(directory, report)
+    criteria = "全部请求成功且播放零中断" if args.require_continuous else "全部请求成功"
     if best is None:
-        print("没有全部成功的候选组合，不生成推荐配置，请检查日志。", flush=True)
+        print(f"没有满足「{criteria}」的候选组合，详细结果见 results.json。", flush=True)
         return 1
     config = (f"M5_WORKERS={best['workers']}\nM5_THREADS={best['threads']}\n"
               f"TTS_MAX_CONCURRENT_TASKS={best['workers']}\n"
               f"TTS_MAX_PENDING_TASKS={max(0, args.concurrency - best['workers'])}\n")
     (directory / "recommended.env").write_text(config, encoding="utf-8")
-    print("\n推荐（已测候选中全部任务成功、吞吐最高）：\n" + config, flush=True)
+    print(f"\n推荐（已测候选中{criteria}、吞吐最高）：\n" + config, flush=True)
     print("结果仅适用于本次文本、并发、CPU/容器配额和机器负载；配置未自动应用。", flush=True)
     return 0
 

@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 import subprocess
 import sys
 
@@ -15,7 +15,7 @@ import grpc
 
 from backend.m5.generated import inference_pb2 as pb
 from backend.m5.generated import inference_pb2_grpc as rpc
-from backend.m5.tune import batch, combinations, corpus, recommend, resolve_requests, summarize
+from backend.m5.tune import batch, combinations, corpus, recommend, resolve_requests, stream_request, summarize
 from backend.m5.processes import ProcessTree
 
 
@@ -81,11 +81,28 @@ class TuneTests(unittest.TestCase):
         self.assertEqual(len(corpus(None, 10)), 10)
 
     def test_recommendation_excludes_failures_and_uses_throughput_first(self):
-        good = dict(ok=True, requests_per_s=2, first_p95_s=3, peak_rss_mb=100)
+        good = dict(ok=True, requests_per_s=2, first_p95_s=3, peak_rss_mb=100, underruns=0)
         faster_but_failed = dict(good, ok=False, requests_per_s=10)
         lower_latency = dict(good, requests_per_s=1, first_p95_s=.1)
         self.assertIs(recommend([faster_but_failed, lower_latency, good]), good)
         self.assertIsNone(recommend([faster_but_failed]))
+        stalled = dict(good, requests_per_s=4, underruns=1)
+        self.assertIs(recommend([good, stalled]), stalled)
+        self.assertIs(recommend([stalled, faster_but_failed, good], require_continuous=True), good)
+        self.assertIsNone(recommend([stalled], require_continuous=True))
+
+    def test_playback_consumes_buffer_and_counts_only_gaps_between_audio_events(self):
+        chunk = pb.SynthesizeEvent(audio=b"\x00\x00" * 6000)  # 250 ms at 24 kHz.
+        call = MagicMock()
+        call.__iter__.return_value = [chunk] * 5 + [pb.SynthesizeEvent(done=pb.Completion(samples=30000))]
+        call.code.return_value = grpc.StatusCode.OK
+        stub = Mock()
+        stub.Synthesize.return_value = call
+        # Early second chunk, third exactly on time, then 250 ms and 125 ms without audio.
+        with patch("backend.m5.tune.time.perf_counter", side_effect=[0, 3, 3.125, 3.5, 4, 4.375, 10]):
+            row = stream_request(stub, pb.ModelInfo(identity="model"), "文本", "a", "Chinese", 20)
+        self.assertEqual((row["underruns"], row["stall_s"], row["max_stall_s"]), (2, .375, .25))
+        self.assertEqual(row["audio_s"], 1.25)
 
     def test_streaming_batch_bounds_execution_and_counts_queue_time(self):
         service = Inference()
@@ -104,6 +121,7 @@ class TuneTests(unittest.TestCase):
                 self.assertGreater(max(row["queue_s"] for row in result["requests"]), .02)
                 summary = summarize(2, 1, [result], 1024**2, .5)
                 self.assertEqual(summary["successes"], 6)
+                self.assertEqual(summary["underruns"], 0)
                 self.assertGreater(summary["first_p95_s"], .02)
                 self.assertEqual(summary["peak_rss_mb"], 1)
                 failed = batch(stub, info, [dict(input="fail", voice="a", language="Chinese")], 3)
