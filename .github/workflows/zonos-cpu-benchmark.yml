@@ -1,0 +1,47 @@
+name: ZONOS3 CPU benchmark runtime
+'on':
+  push:
+    branches: ['codex/zonos-cpu-benchmark-*']
+    paths: ['.github/workflows/zonos-cpu-benchmark.yml']
+permissions:
+  contents: read
+jobs:
+  windows-cpu:
+    runs-on: windows-latest
+    timeout-minutes: 24
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Zyphra/ZONOS3-Mini
+          ref: a50e14117d99181ba7f28047b451ba03ba1a09a9
+          persist-credentials: false
+      - name: Fetch pinned upstream submodules
+        run: git submodule update --init servers/ggml/ggml third_party/fusealign-multilingual third_party/zyphra-textnorm
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Windows CPU server
+        working-directory: servers/ggml
+        shell: pwsh
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DZONOS3_APP=OFF -DGGML_VULKAN=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build --parallel 4 --target zonos3-server zonos3-cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Collect binaries
+        shell: pwsh
+        run: |
+          $distPath = New-Item -ItemType Directory -Path dist
+          foreach ($binary in @('zonos3-server.exe','zonos3-cli.exe')) {
+            $found = Get-ChildItem servers/ggml/build -Recurse -Filter $binary | Select-Object -First 1
+            if (-not $found) { throw "Missing $binary" }
+            Copy-Item -LiteralPath $found.FullName -Destination $distPath
+          }
+          Copy-Item LICENSE -Destination $distPath
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zonos3-windows-x64-cpu
+          path: dist/
+          if-no-files-found: error
+          retention-days: 3
