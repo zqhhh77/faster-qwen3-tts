@@ -9,7 +9,6 @@ from pathlib import Path
 import re
 import shutil
 import signal
-from urllib.parse import urlsplit
 
 import edge_tts
 import grpc
@@ -36,20 +35,23 @@ def read_voices(path):
     return voices
 
 
-def read_proxy(value):
-    if not value.strip():
-        return None
-    try:
-        url = urlsplit(value.strip())
-        if (url.scheme in ("http", "https") and url.hostname and url.port != 0
-                and url.path in ("", "/") and not url.query and not url.fragment):
-            return value.strip()
-    except ValueError:
-        pass
-    raise ValueError("EDGE_TTS_PROXY 必须是 HTTP 或 HTTPS CONNECT 代理地址")
+class MotoEventLoop(asyncio.ProactorEventLoop if os.name == "nt" else asyncio.SelectorEventLoop):
+    def __init__(self, address):
+        host, separator, port = address.rpartition(":")
+        if not separator or not host or not port.isdecimal() or not 1 <= int(port) <= 65535:
+            raise ValueError("EDGE_TTS_MOTO_ADDR 必须使用 主机:端口 格式")
+        super().__init__()
+        self.moto_host = host.removeprefix("[").removesuffix("]")
+        self.moto_port = int(port)
+
+    async def getaddrinfo(self, host, port, **kwargs):
+        # 改写 TCP 目标，WebSocket URL 仍使用原域名。
+        if host == "speech.platform.bing.com" and port == 443:
+            host, port = self.moto_host, self.moto_port
+        return await super().getaddrinfo(host, port, **kwargs)
 
 
-async def decode(text, voice, ffmpeg, proxy):
+async def decode(text, voice, ffmpeg):
     process = await asyncio.create_subprocess_exec(
         ffmpeg, "-hide_banner", "-loglevel", "error", "-xerror",
         "-f", "mp3", "-probesize", "4096", "-analyzeduration", "100000", "-i", "pipe:0",
@@ -60,7 +62,7 @@ async def decode(text, voice, ffmpeg, proxy):
 
     async def feed_mp3():
         try:
-            async with aclosing(edge_tts.Communicate(text, voice, proxy=proxy).stream()) as stream:
+            async with aclosing(edge_tts.Communicate(text, voice).stream()) as stream:
                 async for chunk in stream:
                     if chunk["type"] == "audio":
                         process.stdin.write(chunk["data"])
@@ -94,10 +96,9 @@ async def decode(text, voice, ffmpeg, proxy):
 
 
 class Service(rpc.InferenceServiceServicer):
-    def __init__(self, voices, workers, ffmpeg, proxy=None):
+    def __init__(self, voices, workers, ffmpeg):
         self.voices = voices
         self.ffmpeg = ffmpeg
-        self.proxy = proxy
         self.slots = asyncio.Semaphore(workers)
         identity = json.dumps(voices, sort_keys=True).encode()
         self.info = pb.ModelInfo(
@@ -124,7 +125,7 @@ class Service(rpc.InferenceServiceServicer):
         async with self.slots:
             samples = 0
             try:
-                async with aclosing(decode(request.input, voice, self.ffmpeg, self.proxy)) as chunks:
+                async with aclosing(decode(request.input, voice, self.ffmpeg)) as chunks:
                     async for pcm in chunks:
                         samples += len(pcm) // 2
                         await context.write(pb.SynthesizeEvent(audio=pcm))
@@ -139,7 +140,6 @@ class Service(rpc.InferenceServiceServicer):
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     voices = read_voices(os.environ["EDGE_TTS_VOICES_FILE"])
-    proxy = read_proxy(os.environ.get("EDGE_TTS_PROXY", ""))
     workers = int(os.environ.get("EDGE_TTS_WORKERS", "4"))
     if not 1 <= workers <= 256:
         raise ValueError("EDGE_TTS_WORKERS 必须为 1 到 256")
@@ -148,7 +148,7 @@ async def main():
         raise RuntimeError("Edge 后端需要 PATH 中的 FFmpeg")
     server = grpc.aio.server(maximum_concurrent_rpcs=workers + 16,
                              options=(("grpc.max_receive_message_length", 65536),))
-    rpc.add_InferenceServiceServicer_to_server(Service(voices, workers, ffmpeg, proxy), server)
+    rpc.add_InferenceServiceServicer_to_server(Service(voices, workers, ffmpeg), server)
     address = os.environ.get("EDGE_TTS_LISTEN", "[::]:50051")
     server.add_insecure_port(address)
     stop = asyncio.Event()
@@ -164,4 +164,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    moto = os.environ.get("EDGE_TTS_MOTO_ADDR", "").strip() or "115.28.184.80:9010"
+    if moto == "direct":
+        asyncio.run(main())
+    else:
+        with asyncio.Runner(loop_factory=lambda: MotoEventLoop(moto)) as runner:
+            runner.run(main())

@@ -8,6 +8,7 @@ services:
     environment:
       EDGE_TTS_VOICES_FILE: /config/voices.json
       EDGE_TTS_WORKERS: ${EDGE_TTS_WORKERS:-4}
+      EDGE_TTS_MOTO_ADDR: "${EDGE_TTS_MOTO_ADDR:-}"
     volumes:
       - type: bind
         source: "${EDGE_TTS_VOICES_FILE:?请设置本地 Edge 音色映射文件}"

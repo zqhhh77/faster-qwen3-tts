@@ -14,7 +14,7 @@ docker compose -f compose.edge.yaml up -d --pull always --no-build
 
 ## 出网代理
 
-服务器可以访问微软语音服务时，使用基础 Compose 即可直连。
+Edge 后端默认直接连接 Moto 的 `115.28.184.80:9010`。要使用其他 Moto 地址，在 `.env` 里设置 `EDGE_TTS_MOTO_ADDR=主机:端口`。服务器可以访问微软语音服务时，设置 `EDGE_TTS_MOTO_ADDR=direct`。
 
 如果只在一台可出网电脑部署 Moto，使用 TCP 转发。下面是 Moto 配置示例，监听地址填中转电脑的内网 IP，`allowlist` 填 Edge 服务器访问 Moto 时的来源 IP。
 
@@ -33,15 +33,9 @@ docker compose -f compose.edge.yaml up -d --pull always --no-build
 }
 ```
 
-叠加 Moto 配置启动时，`EDGE_TTS_MOTO_ADDR` 默认使用 `115.28.184.80:9010`。要指定其他中转地址，在 `.env` 设置该变量，格式为 `主机:端口`。
+Edge 保持微软原域名建立 WebSocket，Moto 在 TCP 层转发至微软的 443 端口。参见 [Moto 部署文档](https://github.com/cppla/moto)。
 
-```sh
-docker compose -f compose.edge.yaml -f compose.edge.moto.yaml up -d --pull always --no-build
-```
-
-该配置启动一个容器内的 TCP 转发服务，把 Edge 的连接送到配置的 Moto 地址。Edge 继续使用微软原域名进行 TLS 校验，Moto 转发到微软的 443 端口。Moto 的 HTTP CONNECT 模式用于接入已有的 H2/H3 CONNECT 上游代理。参见 [Moto 部署文档](https://github.com/cppla/moto)。
-
-两种部署方式都从 GHCR 拉取配套的 `linux/amd64` 镜像。默认使用 `edge` 标签。设置 `TTS_IMAGE_TAG=sha-<完整提交 SHA>` 可固定版本。
+部署从 GHCR 拉取配套的 `linux/amd64` 镜像。默认使用 `edge` 标签。设置 `TTS_IMAGE_TAG=sha-<完整提交 SHA>` 可固定版本。升级之前使用 Moto 中转容器的专用部署项目时，可在启动命令中加 `--remove-orphans` 清理旧的中转容器。
 
 ## 调用示例
 

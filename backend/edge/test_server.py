@@ -9,17 +9,11 @@ from backend.edge import server
 
 
 class EdgeServerTest(IsolatedAsyncioTestCase):
-    def test_optional_proxy(self):
-        self.assertIsNone(server.read_proxy(" "))
-        self.assertEqual(server.read_proxy("http://moto:9006"), "http://moto:9006")
-        with self.assertRaises(ValueError):
-            server.read_proxy("socks5://moto:9006")
-
     async def test_public_aliases_and_completion(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "voices.json"
             path.write_text('{"default":"zh-CN-XiaoxiaoNeural","broadcast":"zh-CN-YunxiNeural"}')
-            service = server.Service(server.read_voices(path), 1, "ffmpeg", "http://moto:9006")
+            service = server.Service(server.read_voices(path), 1, "ffmpeg")
             path.write_text('{"default":"zh-CN-YunxiNeural"}')
             changed = server.Service(server.read_voices(path), 1, "ffmpeg")
             self.assertNotEqual(service.info.identity, changed.info.identity)
@@ -33,9 +27,8 @@ class EdgeServerTest(IsolatedAsyncioTestCase):
         await grpc_server.start()
         self.addAsyncCleanup(grpc_server.stop, 0)
 
-        async def decode(text, voice, ffmpeg, proxy):
+        async def decode(text, voice, ffmpeg):
             self.assertEqual(voice, "zh-CN-YunxiNeural")
-            self.assertEqual(proxy, "http://moto:9006")
             yield b"\x00\x01"
             if text == "中断":
                 raise RuntimeError("上游中断")
