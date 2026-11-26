@@ -39,7 +39,7 @@ EDGE_TTS_PROXY=http://192.168.10.20:9006
 }
 ```
 
-在 Edge 服务器上的 `.env` 设置 `EDGE_TTS_MOTO_ADDR=192.168.10.20:9010`，将 `EDGE_TTS_PROXY` 留空，再叠加 Moto 配置启动。
+在 Edge 服务器上的 `.env` 设置 `EDGE_TTS_PROXY=192.168.10.20:9010`，再叠加 Moto 配置启动。这个值使用 `主机:端口` 格式。
 
 ```sh
 docker compose -f compose.edge.yaml -f compose.edge.moto.yaml up -d --pull always --no-build
