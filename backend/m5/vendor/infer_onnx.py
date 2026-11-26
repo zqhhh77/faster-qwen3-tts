@@ -281,7 +281,8 @@ class M5Onnx:
                 positions = positions[:, -1:] + 1
             return generated
 
-        executor = ThreadPoolExecutor(max_workers=1) if decoder_prefix is not None else None
+        # 生成和缓存解码的状态独立，FP32 流式推理也可以重叠执行。
+        executor = ThreadPoolExecutor(max_workers=1) if stream and self.codec_mode == "cached" else None
         try:
             end = generate_batch(first_frames if stream else max_frames)
             while decoded < end:

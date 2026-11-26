@@ -1,4 +1,4 @@
-"""预计算 M5 INT8 深度解码器中仅依赖上一个码本 token 的首层 Q/K/V 投影。"""
+"""预计算 M5 深度解码器中仅依赖上一个码本 token 的首层 Q/K/V 投影。"""
 import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper

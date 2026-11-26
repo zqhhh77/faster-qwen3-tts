@@ -12,6 +12,7 @@ import grpc
 from .generated import inference_pb2 as pb
 from .generated import inference_pb2_grpc as rpc
 from .runtime import LANGUAGES, Runtime
+from .batching import DepthBatcher
 
 
 class Service(rpc.InferenceServiceServicer):
@@ -20,9 +21,21 @@ class Service(rpc.InferenceServiceServicer):
             raise ValueError("推理实例必须使用一致的模型和音色配置")
         self.runtime = runtimes[0]
         self.capacity = len(runtimes)
+        self.depth_batcher = None
+        if getattr(self.runtime, "depth_batch", False):
+            if self.capacity != 2:
+                raise ValueError("深度合批需要 M5_WORKERS=2")
+            self.depth_batcher = DepthBatcher.load(self.runtime.model)
+            for runtime in runtimes:
+                runtime.model.sessions["depth_frame"] = self.depth_batcher
+            logging.info("双请求深度合批已启用，各请求独立保留音色和解码状态")
         self.available = Queue(maxsize=self.capacity)
         for runtime in runtimes:
             self.available.put_nowait(runtime)
+
+    def close(self):
+        if self.depth_batcher is not None:
+            self.depth_batcher.close()
 
     def GetInfo(self, request, context):
         r = self.runtime
@@ -47,6 +60,8 @@ class Service(rpc.InferenceServiceServicer):
             context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "模型正在处理其他请求")
         started, first, samples = time.perf_counter(), None, 0
         chunks = None
+        if self.depth_batcher is not None:
+            self.depth_batcher.enter()
         try:
             chunks = r.generate(request.input, voice, request.language)
             while context.is_active():
@@ -78,6 +93,8 @@ class Service(rpc.InferenceServiceServicer):
                 if chunks is not None:
                     chunks.close()
             finally:
+                if self.depth_batcher is not None:
+                    self.depth_batcher.leave()
                 self.available.put_nowait(r)
                 logging.info("M5 请求结束 voice=%s chars=%d first_audio_s=%s elapsed_s=%.3f audio_s=%.3f",
                              voice, len(request.input), first, time.perf_counter()-started, samples/24000)
@@ -98,9 +115,11 @@ def main():
                          maximum_concurrent_rpcs=workers + 16,
                          options=(("grpc.max_receive_message_length", 65536),
                                   ("grpc.max_send_message_length", 1048576)))
-    rpc.add_InferenceServiceServicer_to_server(Service(runtimes), server)
+    service = Service(runtimes)
+    rpc.add_InferenceServiceServicer_to_server(service, server)
     address = os.environ.get("M5_LISTEN", "[::]:50051")
     if not server.add_insecure_port(address):
+        service.close()
         raise RuntimeError(f"无法监听 gRPC 地址: {address}")
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -111,6 +130,7 @@ def main():
         stop.wait()
     finally:
         server.stop(10).wait()
+        service.close()
 
 
 if __name__ == "__main__":

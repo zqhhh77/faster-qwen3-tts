@@ -54,12 +54,31 @@ class RuntimeTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.cache_root = Path(directory.name)
         environment = patch.dict(os.environ, {"M5_ALERT_CACHE_DIR": str(self.cache_root),
-                                               "M5_ALERT_SHIP_PARTS": "off", "M5_ALERT_NUMBER_TAIL_SPEED": "0.65"})
+                                               "M5_ALERT_SHIP_PARTS": "off", "M5_ALERT_NUMBER_TAIL_SPEED": "0.65",
+                                               "M5_DEPTH_BATCH": "off"})
         environment.start()
         self.addCleanup(environment.stop)
 
     def disk_cache(self, name="fields", max_bytes=1 << 20):
         return AlertFieldCache(self.cache_root / name, max_bytes)
+
+    def test_pair_model_asset_is_verified_and_required_when_enabled(self):
+        root = self.cache_root
+        (root / "manifest.json").write_text('{"depth_frame_pair": true}', encoding="utf-8")
+        (root / "depth_frame_pair.onnx").write_bytes(b"paired-model")
+        checks = {name: {"bytes": (root / name).stat().st_size,
+                         "sha256": hashlib.sha256((root / name).read_bytes()).hexdigest()}
+                  for name in ("manifest.json", "depth_frame_pair.onnx")}
+        (root / "checksums.json").write_text(json.dumps(checks), encoding="utf-8")
+        with patch("backend.m5.runtime.FILES", ("manifest.json", "checksums.json")):
+            self.assertIn("depth_frame_pair.onnx", verify_bundle(root))
+            (root / "depth_frame_pair.onnx").write_bytes(b"changed-model")
+            with self.assertRaisesRegex(ValueError, "模型文件校验失败"):
+                verify_bundle(root)
+        with patch.dict(os.environ, {"M5_MODEL": str(root), "M5_DEPTH_BATCH": "on"}), \
+                patch("backend.m5.runtime.verify_bundle", return_value={}):
+            with self.assertRaisesRegex(ValueError, "开启深度合批需要"):
+                Runtime()
 
     def test_startup_defaults_to_four_phrases_per_voice_shared_by_workers(self):
         with tempfile.TemporaryDirectory() as directory:

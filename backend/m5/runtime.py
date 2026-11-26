@@ -34,7 +34,9 @@ def digest_file(path: Path) -> str:
 
 def verify_bundle(root: Path) -> dict:
     checks = json.loads((root / "checksums.json").read_text(encoding="utf-8"))
-    for name in FILES[:-1]:
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    names = (*FILES[:-1], "depth_frame_pair.onnx") if manifest.get("depth_frame_pair") else FILES[:-1]
+    for name in names:
         path = root / name
         expected = checks[name]
         digest = digest_file(path)
@@ -45,7 +47,7 @@ def verify_bundle(root: Path) -> dict:
             digest, size = hashlib.sha256(normalized).hexdigest(), len(normalized)
         if digest != expected["sha256"] or size != expected["bytes"]:
             raise ValueError(f"模型文件校验失败: {name}")
-    return {name: checks[name]["sha256"] for name in FILES[:-1]}
+    return {name: checks[name]["sha256"] for name in names}
 
 
 def pcm16(chunk) -> bytes:
@@ -60,6 +62,12 @@ class Runtime:
         root = Path(os.environ.get("M5_MODEL", "/models/m5")).resolve(strict=True)
         assets = verify_bundle(root)
         self.threads = int(os.environ.get("M5_THREADS", "2"))
+        batch_mode = os.environ.get("M5_DEPTH_BATCH", "off")
+        if batch_mode not in ("on", "off"):
+            raise ValueError("M5_DEPTH_BATCH 必须为 on 或 off")
+        self.depth_batch = batch_mode == "on"
+        if self.depth_batch and "depth_frame_pair.onnx" not in assets:
+            raise ValueError("开启深度合批需要带 depth_frame_pair.onnx 的模型目录")
         self.max_frames = int(os.environ.get("M5_MAX_FRAMES", "1024"))
         if not 1 <= self.threads <= 256 or not 1 <= self.max_frames <= 2048:
             raise ValueError("M5_THREADS 或 M5_MAX_FRAMES 超出允许范围")
@@ -124,7 +132,7 @@ class Runtime:
                                                 timeout=5, text=True).stdout.splitlines()[0]
         identity = {
             "backend": "m5-cpu", "assets": assets, "voices": identity_voices,
-            "default_voice": self.default_voice, "threads": self.threads,
+            "default_voice": self.default_voice, "threads": self.threads, "depth_batch": self.depth_batch,
             "max_frames": self.max_frames, "settings": self.settings,
             "normalization": self.normalization, "alert_phrases": phrase_mode,
             "ship_parts": self.ship_parts, "number_tail_speed": self.number_tail_speed if self.ship_parts else 1,
@@ -132,6 +140,7 @@ class Runtime:
             "source": {str(p.relative_to(Path(__file__).parent)): digest_file(p)
                        for p in (Path(__file__), Path(__file__).with_name("server.py"),
                                  Path(__file__).with_name("alert_phrases.py"),
+                                 Path(__file__).with_name("batching.py"),
                                  VENDOR / "infer_onnx.py", VENDOR / "text_normalization.py")},
             "packages": {name: importlib.metadata.version(name) for name in (
                 "numpy", "onnxruntime", "scipy", "tokenizers", "soundfile")},

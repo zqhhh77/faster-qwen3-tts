@@ -1,4 +1,5 @@
 import unittest
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -72,6 +73,37 @@ class StreamTailTests(unittest.TestCase):
         self.assertFalse(model.stats["eos"])
         self.assertTrue(model.stats["truncated"])
         self.assertEqual(sum(map(len, chunks)), 10 * 1920 - 2400)
+
+    @patch("text_normalization.normalize_text", side_effect=lambda text, **kwargs: text)
+    def test_fp32_without_decoder_prefix_overlaps_generation_and_decoding(self, normalize):
+        model = self.model(9)
+        model.meta["depth_frame_precision"] = "fp32"
+        model.codec_meta = dict(layers=1, kv_heads=1, head_dim=1, states=[])
+        generating, decoding = Event(), Event()
+        backbone = model.sessions["backbone"].run
+        decode = model._decode
+        calls = 0
+
+        def next_frame(outputs, feed):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                generating.set()
+                self.assertTrue(decoding.wait(2), "下一批生成没有与解码重叠执行")
+            return backbone(outputs, feed)
+
+        def decode_chunk(codes):
+            decoding.set()
+            self.assertTrue(generating.wait(2), "解码前没有启动下一批生成")
+            return decode(codes)
+
+        model.sessions["backbone"].run = next_frame
+        model._decode = decode_chunk
+        chunks = list(model.generate("请保持关注。", "unused.wav", "参考文本", stream=True,
+                                     first_frames=2, chunk_frames=4, max_frames=32,
+                                     reference_codes=np.zeros((8, 16), np.int64)))
+        self.assertTrue(model.stats["eos"])
+        self.assertEqual(sum(map(len, chunks)), 9 * 1920)
 
 
 if __name__ == "__main__":
