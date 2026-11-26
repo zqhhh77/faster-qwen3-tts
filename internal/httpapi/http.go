@@ -284,6 +284,18 @@ func (g *Handler) speech(w http.ResponseWriter, r *http.Request, asSSE bool, tra
 		reply(w, 503, "语音生成失败或请求已取消", nil)
 		return
 	}
+	if g.c.StartupBuffer > 0 {
+		started := time.Now()
+		err = g.cache.WaitStartup(r.Context(), rec, g.c.StartupBuffer)
+		if err == nil {
+			n, err = g.cache.Read(r.Context(), rec, 0, buffer)
+		}
+		if err != nil {
+			reply(w, 503, "语音生成失败或请求已取消", nil)
+			return
+		}
+		log.Printf("开播缓冲结束 trackid=%s voice=%s configured_ms=%d waited_ms=%d first_audio_ms=%d", trackID, req.Voice, g.c.StartupBuffer.Milliseconds(), time.Since(started).Milliseconds(), n*1000/48000)
+	}
 	h := w.Header()
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Accel-Buffering", "no")

@@ -15,7 +15,7 @@ import grpc
 
 from backend.m5.generated import inference_pb2 as pb
 from backend.m5.generated import inference_pb2_grpc as rpc
-from backend.m5.tune import batch, combinations, corpus, recommend, resolve_requests, stream_request, summarize
+from backend.m5.tune import batch, combinations, corpus, playback, recommend, resolve_requests, stream_request, summarize
 from backend.m5.processes import ProcessTree
 
 
@@ -115,8 +115,14 @@ class TuneTests(unittest.TestCase):
                 stub = rpc.InferenceServiceStub(channel)
                 info = pb.ModelInfo(identity="a" * 64, concurrency=2)
                 requests = [dict(input=f"任务{i}", voice="a", language="Chinese") for i in range(6)]
-                result = batch(stub, info, requests, 3)
+                result = batch(stub, info, requests, 3, trace=True, prebuffer_ms=200)
                 self.assertTrue(all(row["ok"] for row in result["requests"]))
+                for row in result["requests"]:
+                    self.assertEqual(row["voice"], "a")
+                    self.assertEqual(len(row["chunks"]), 1)
+                    self.assertEqual(row["buffered"]["underruns"], 0)
+                    self.assertGreater(row["buffered"]["first_s"], row["first_s"])
+                    self.assertAlmostEqual(row["buffered"]["first_s"], row["complete_s"], places=5)
                 self.assertEqual(service.maximum, 2)
                 self.assertGreater(max(row["queue_s"] for row in result["requests"]), .02)
                 summary = summarize(2, 1, [result], 1024**2, .5)
@@ -133,6 +139,41 @@ class TuneTests(unittest.TestCase):
                 cancel.assert_called_once()
         finally:
             server.stop(0).wait()
+
+    def test_same_chunks_compare_immediate_and_buffered_playback(self):
+        chunks = [dict(at_s=at, audio_s=.25) for at in (1, 1.375, 1.65)]
+        original = [dict(chunk) for chunk in chunks]
+        immediate = playback(chunks)
+        buffered = playback(chunks, 200, complete_s=1.66)
+        self.assertEqual(immediate["underruns"], 2)
+        self.assertAlmostEqual(immediate["stall_s"], .15)
+        self.assertEqual(buffered, dict(first_s=1.2, underruns=0, stall_s=0, max_stall_s=0))
+        self.assertEqual(chunks, original)
+        # 音频在缓冲期内完成时提前开播；持续供音不足则仍如实记录中断。
+        self.assertEqual(playback(chunks, 1000, complete_s=1.66)["first_s"], 1.66)
+        slow = [dict(at_s=at, audio_s=.1) for at in (1, 1.3, 1.6, 1.9)]
+        self.assertAlmostEqual(playback(slow, 200)["stall_s"], .4)
+        for invalid in (-1, 1001, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                playback(chunks, invalid)
+
+    def test_stream_trace_uses_actual_arrivals_without_sleeping(self):
+        chunk = pb.SynthesizeEvent(audio=b"\x00\x00" * 6000)
+        call = MagicMock()
+        call.__iter__.return_value = [chunk] * 3 + [pb.SynthesizeEvent(done=pb.Completion(samples=18000))]
+        call.code.return_value = grpc.StatusCode.OK
+        stub = Mock()
+        stub.Synthesize.return_value = call
+        with patch("backend.m5.tune.time.perf_counter", side_effect=[10, 11, 11.375, 11.65, 11.66]), \
+                patch("backend.m5.tune.time.sleep", side_effect=AssertionError("采样时不能暂停接收")):
+            row = stream_request(stub, pb.ModelInfo(identity="model"), "文本", "a", "Chinese", 20,
+                                 trace=True, prebuffer_ms=200)
+        self.assertEqual(row["underruns"], 2)
+        self.assertEqual(len(row["chunks"]), 3)
+        self.assertEqual(row["chunks"][1], dict(at_s=1.375, audio_s=.25, bytes=12000))
+        self.assertEqual(row["buffered"]["underruns"], 0)
+        self.assertAlmostEqual(row["buffered"]["first_at"], 11.2)
+        call.cancel.assert_called_once()
 
 
 if __name__ == "__main__":

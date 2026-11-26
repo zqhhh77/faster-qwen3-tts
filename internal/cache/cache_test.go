@@ -284,3 +284,21 @@ func TestCapacityProtectsReadersAndEvictsIdle(t *testing.T) {
 		t.Fatal(c.accounted)
 	}
 }
+
+func TestStartupBufferCancellationAndEarlyCompletion(t *testing.T) {
+	c := &Store{ctx: context.Background()}
+	r := &Record{changed: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.WaitStartup(ctx, r, time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("请求取消未中断缓冲: %v", err)
+	}
+	r.done = true
+	if err := c.WaitStartup(context.Background(), r, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	r.err = errors.New("生成失败")
+	if err := c.WaitStartup(context.Background(), r, time.Second); err != r.err {
+		t.Fatal(err)
+	}
+}
