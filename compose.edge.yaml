@@ -8,7 +8,6 @@ services:
     environment:
       EDGE_TTS_VOICES_FILE: /config/voices.json
       EDGE_TTS_WORKERS: ${EDGE_TTS_WORKERS:-4}
-      EDGE_TTS_PROXY: "${EDGE_TTS_PROXY:-}"
     volumes:
       - type: bind
         source: "${EDGE_TTS_VOICES_FILE:?请设置本地 Edge 音色映射文件}"

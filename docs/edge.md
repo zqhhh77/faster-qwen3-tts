@@ -14,13 +14,7 @@ docker compose -f compose.edge.yaml up -d --pull always --no-build
 
 ## 出网代理
 
-服务器可以访问微软语音服务时，使用基础 Compose 即可直连。`EDGE_TTS_PROXY` 可留空。
-
-如果已经部署了 HTTP CONNECT 代理，在本项目的 `.env` 配置代理地址，然后重新运行基础 Compose。HTTP 和 HTTPS 代理地址均可配置。
-
-```dotenv
-EDGE_TTS_PROXY=http://192.168.10.20:9006
-```
+服务器可以访问微软语音服务时，使用基础 Compose 即可直连。
 
 如果只在一台可出网电脑部署 Moto，使用 TCP 转发。下面是 Moto 配置示例，监听地址填中转电脑的内网 IP，`allowlist` 填 Edge 服务器访问 Moto 时的来源 IP。
 
@@ -39,7 +33,7 @@ EDGE_TTS_PROXY=http://192.168.10.20:9006
 }
 ```
 
-在 Edge 服务器上的 `.env` 设置 `EDGE_TTS_PROXY=192.168.10.20:9010`，再叠加 Moto 配置启动。这个值使用 `主机:端口` 格式。
+叠加 Moto 配置启动时，`EDGE_TTS_MOTO_ADDR` 默认使用 `115.28.184.80:9010`。要指定其他中转地址，在 `.env` 设置该变量，格式为 `主机:端口`。
 
 ```sh
 docker compose -f compose.edge.yaml -f compose.edge.moto.yaml up -d --pull always --no-build

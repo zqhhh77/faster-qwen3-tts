@@ -1,14 +1,12 @@
 services:
   edge-backend:
-    environment:
-      EDGE_TTS_PROXY: ""
     depends_on:
       - moto-relay
 
   moto-relay:
     image: ${TTS_IMAGE_PREFIX:-ghcr.io/zqhhh77/faster-qwen3-tts}-edge:${TTS_IMAGE_TAG:-edge}
     restart: unless-stopped
-    entrypoint: ["socat", "TCP-LISTEN:443,reuseaddr,fork", "TCP:${EDGE_TTS_PROXY:?请设置 Moto 地址和端口},connect-timeout=10"]
+    entrypoint: ["socat", "TCP-LISTEN:443,reuseaddr,fork", "TCP:${EDGE_TTS_MOTO_ADDR:-115.28.184.80:9010},connect-timeout=10"]
     networks:
       default:
         aliases:
