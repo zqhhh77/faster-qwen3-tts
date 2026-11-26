@@ -12,11 +12,13 @@ services:
       M5_MAX_FRAMES: ${M5_MAX_FRAMES:-1024}
       M5_ALERT_PHRASES: ${M5_ALERT_PHRASES:-on}
       M5_ALERT_FIELD_CACHE_MB: ${M5_ALERT_FIELD_CACHE_MB:-0}
+      M5_ALERT_CACHE_DIR: /cache/m5-alerts
       M5_DEFAULT_VOICE: ${M5_DEFAULT_VOICE:-default}
       M5_VOICES_FILE: ${M5_VOICES_FILE:-/app/backend/m5/voices.json}
     volumes:
       - ${M5_MODEL_HOST_DIR:-./models/M5-TTS-50M-ONNX-depth-int8}:/models/m5:ro
       - ./references:/references:ro
+      - ${M5_ALERT_CACHE_HOST_DIR:-./cache/m5-alerts}:/cache/m5-alerts
     expose: ["50051"]
     stop_grace_period: 15s
 

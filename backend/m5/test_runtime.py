@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -48,6 +49,17 @@ class FakeModel:
 
 
 class RuntimeTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.cache_root = Path(directory.name)
+        environment = patch.dict(os.environ, {"M5_ALERT_CACHE_DIR": str(self.cache_root)})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def disk_cache(self, name="fields", max_bytes=1 << 20):
+        return AlertFieldCache(self.cache_root / name, max_bytes)
+
     def test_startup_defaults_to_four_phrases_per_voice_shared_by_workers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -58,7 +70,7 @@ class RuntimeTests(unittest.TestCase):
             with patch.dict(os.environ, {"M5_MODEL": directory, "M5_VOICES_FILE": str(voices),
                                          "M5_DEFAULT_VOICE": "a", "M5_TEXT_NORMALIZATION": "off"}), \
                     patch("backend.m5.runtime.verify_bundle", return_value={}), \
-                    patch("backend.m5.runtime.M5Onnx", side_effect=[FakeModel(), FakeModel()]), \
+                    patch("backend.m5.runtime.M5Onnx", side_effect=lambda *a, **kw: FakeModel()), \
                     patch("backend.m5.runtime.read_reference", return_value=np.zeros(100)):
                 os.environ.pop("M5_ALERT_PHRASES", None)
                 os.environ.pop("M5_ALERT_FIELD_CACHE_MB", None)
@@ -68,8 +80,44 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(other.model.used, [])
                 self.assertIs(first.alert_phrases, other.alert_phrases)
                 self.assertIsNone(first.field_cache)
+                restarted = Runtime()
+                self.assertEqual(restarted.model.used, [])
                 for voice in ("a", "b"):
-                    self.assertEqual(set(first.alert_phrases[voice]), set(ALERT_PHRASES))
+                    for phrase in ALERT_PHRASES:
+                        self.assertEqual(first._alert_phrase(voice, phrase), restarted._alert_phrase(voice, phrase))
+                self.assertEqual(len(list((self.cache_root / "phrases").glob("*.pcm"))), 8)
+                self.assertEqual(first.alert_phrases._entries, {})
+
+    def test_reference_and_model_changes_invalidate_disk_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("a", "b"):
+                (root / (name + ".wav")).write_bytes(name.encode())
+            voices = root / "voices.json"
+            definitions = {name: {"wav": name + ".wav", "text": "reference"} for name in ("a", "b")}
+            voices.write_text(json.dumps(definitions), encoding="utf-8")
+            with patch.dict(os.environ, {"M5_MODEL": directory, "M5_VOICES_FILE": str(voices),
+                                        "M5_DEFAULT_VOICE": "a", "M5_TEXT_NORMALIZATION": "off",
+                                        "M5_ALERT_PHRASES": "on", "M5_ALERT_FIELD_CACHE_MB": "1"}), \
+                    patch("backend.m5.runtime.verify_bundle", return_value={}) as assets, \
+                    patch("backend.m5.runtime.M5Onnx", side_effect=lambda *a, **kw: FakeModel()), \
+                    patch("backend.m5.runtime.read_reference", return_value=np.zeros(100)):
+                first = Runtime()
+                text = "发现甲船，在北港，触发偏航，请立即关注"
+                list(first.generate(text, "b", "Chinese"))
+                restarted = Runtime()
+                list(restarted.generate(text, "b", "Chinese"))
+                self.assertEqual(restarted.model.used, [])
+                (root / "a.wav").write_bytes(b"new reference")
+                changed = Runtime()
+                self.assertEqual(changed.model.used, [1] * 4)
+                list(changed.generate(text, "b", "Chinese"))
+                self.assertEqual(changed.model.used, [1] * 4)
+                definitions["b"]["text"] = "new transcript"
+                voices.write_text(json.dumps(definitions), encoding="utf-8")
+                self.assertEqual(Runtime().model.used, [2] * 4)
+                assets.return_value = {"model": "new"}
+                self.assertEqual(Runtime().model.used, [1] * 4 + [2] * 4)
 
     def test_all_voices_preloaded_and_reused_without_reencoding(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -105,9 +153,9 @@ class RuntimeTests(unittest.TestCase):
 
     def test_alert_fields_and_fallback(self):
         for text in ("发现海巡一号,触发偏航,请保持关注", "发现海巡一号，，触发偏航，请保持关注。"):
-            self.assertEqual(alert_parts(text), ("海巡一号，", "偏航，", "请保持关注"))
+            self.assertEqual(alert_parts(text), ("海巡一号，", "", "偏航，", "请保持关注"))
         self.assertEqual(alert_parts("发现海巡一号，在北港，触发超速，请立即关注。"),
-                         ("海巡一号，在北港，", "超速，", "请立即关注"))
+                         ("海巡一号，", "在北港，", "超速，", "请立即关注"))
         for text in ("发现了一条船", "发现，在东海，触发偏航，请立即关注",
                      "发现甲船，触发，请立即关注", "发现甲船，在，触发偏航，请保持关注",
                      "发现甲船，触发偏航，请保持关注。请回复。", "发现甲船，触发偏航，请注意"):
@@ -115,7 +163,9 @@ class RuntimeTests(unittest.TestCase):
 
     def test_alert_audio_uses_selected_voice_and_only_generates_fields(self):
         runtime = Runtime.__new__(Runtime)
-        runtime.field_cache = AlertFieldCache(1 << 20)
+        runtime.field_cache = self.disk_cache()
+        runtime.alert_phrases = self.disk_cache("phrases", None)
+        runtime.cache_identities = {"a": "a", "b": "b"}
         runtime.model = SimpleNamespace(meta={"min_frames": 6}, stats={})
         runtime.max_frames = 100
         runtime.voices = {"a": "a", "b": "b"}
@@ -133,7 +183,7 @@ class RuntimeTests(unittest.TestCase):
             runtime.model.stats["frames"] = 10
 
         runtime._generate_text = generate
-        runtime.alert_phrases = runtime._prepare_alert_phrases()
+        runtime._prepare_alert_phrases()
         self.assertEqual(len(calls), 2 * len(ALERT_PHRASES))
         calls.clear()
         for ending in ("请立即关注", "请保持关注"):
@@ -142,8 +192,9 @@ class RuntimeTests(unittest.TestCase):
         text = "发现海巡一号，在北港，触发偏航，请保持关注。"
         self.assertEqual(b"".join(runtime.generate(text, "b", "Chinese")),
                          b"".join(audio("b", part) for part in
-                                  ("发现", "海巡一号，在北港，", "触发", "偏航，", "请保持关注。")))
-        self.assertEqual(calls, [("海巡一号，在北港，", "b", "Chinese", 70), ("偏航，", "b", "Chinese", 60)])
+                                  ("发现", "海巡一号，", "在北港，", "触发", "偏航，", "请保持关注。")))
+        self.assertEqual(calls, [("海巡一号，", "b", "Chinese", 70), ("在北港，", "b", "Chinese", 60),
+                                 ("偏航，", "b", "Chinese", 50)])
         calls.clear()
         changed = text.replace("保持", "立即")
         actual = b"".join(runtime.generate(changed, "b", "Chinese"))
@@ -151,10 +202,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(actual.endswith(audio("b", "请立即关注。")))
         new_ship = changed.replace("海巡一号", "海巡二号")
         list(runtime.generate(new_ship, "b", "Chinese"))
-        self.assertEqual([call[0] for call in calls], ["海巡二号，在北港，"])
+        self.assertEqual([call[0] for call in calls], ["海巡二号，"])
         calls.clear()
         list(runtime.generate(text, "a", "Chinese"))
-        self.assertEqual([call[0] for call in calls], ["海巡一号，在北港，", "偏航，"])
+        self.assertEqual([call[0] for call in calls], ["海巡一号，", "在北港，", "偏航，"])
         calls.clear()
         self.assertEqual(list(runtime._alert_field("偏航，", "a", 10, 0)), [audio("a", "偏航，")])
         self.assertEqual(calls, [])
@@ -175,14 +226,17 @@ class RuntimeTests(unittest.TestCase):
 
     def test_alert_prefix_streams_before_subject_finishes_and_releases_generator_on_cancel(self):
         runtime = Runtime.__new__(Runtime)
-        runtime.field_cache = AlertFieldCache(1 << 20)
+        runtime.field_cache = self.disk_cache()
+        runtime.alert_phrases = self.disk_cache("phrases", None)
+        runtime.cache_identities = {"a": "a"}
         runtime.model = SimpleNamespace(meta={"min_frames": 6})
         runtime.max_frames = 100
         runtime.voices = {"a": "a"}
         runtime._frame_budget = lambda *args: 100
         fixed = np.full(2400, 1000, dtype="<i2").tobytes()
         field = np.full(12000, 2000, dtype="<i2").tobytes()
-        runtime.alert_phrases = {"a": {phrase: (fixed, 7) for phrase in ALERT_PHRASES}}
+        for phrase in ALERT_PHRASES:
+            runtime.alert_phrases.put(("a", phrase), fixed, 7)
         closed = []
 
         def generate(text, *args):
@@ -200,18 +254,62 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(closed, ["甲船，"])
         self.assertIsNone(runtime.field_cache.get(("a", "甲船，")))
 
-    def test_field_cache_evicts_by_pcm_size_and_ignores_duplicates(self):
-        cache = AlertFieldCache(6)
+        def failed(*args):
+            yield field
+            raise RuntimeError("truncated")
+
+        runtime._generate_text = failed
+        with self.assertRaises(RuntimeError):
+            list(runtime._alert_field("甲船，", "a", 100, 0))
+        self.assertIsNone(runtime.field_cache.get(("a", "甲船，")))
+
+    def test_disk_cache_persists_lru_quota_and_ignores_duplicates(self):
+        capacity = 2 * AlertFieldCache._header.size + 6
+        cache = self.disk_cache(max_bytes=capacity)
         cache.put("a", b"aa", 1)
-        cache.put("b", b"bbb", 2)
+        cache.put("b", b"bb", 2)
+        os.utime(cache._path("b"), (1, 1))
         self.assertEqual(cache.get("a"), (b"aa", 1))
+        cache = self.disk_cache(max_bytes=capacity)
         cache.put("c", b"cccc", 3)
-        cache.put("a", b"other", 4)
-        cache.put("large", b"1234567", 5)
+        cache.put("a", b"other!", 4)
+        cache.put("large", b"12" * capacity, 5)
         self.assertEqual(cache.get("a"), (b"aa", 1))
         self.assertIsNone(cache.get("b"))
         self.assertIsNone(cache.get("large"))
         self.assertEqual(cache.get("c"), (b"cccc", 3))
+        self.assertLessEqual(sum(p.stat().st_size for p in cache.directory.glob("*.pcm")), capacity)
+        self.assertTrue(all(isinstance(size, int) for size in cache._entries.values()))
+
+    def test_corrupt_and_incomplete_disk_entries_are_not_reused(self):
+        cache = self.disk_cache()
+        for corrupted in (b"partial", cache._header.pack(cache._magic, 7, 2, b"0" * 32) + b"aa"):
+            cache._path("a").write_bytes(corrupted)
+            self.assertIsNone(cache.get("a"))
+            self.assertFalse(cache._path("a").exists())
+        with patch("backend.m5.alert_phrases.os.replace", side_effect=OSError("disk full")):
+            cache.put("a", b"aa", 1)
+        self.assertIsNone(cache.get("a"))
+        self.assertEqual(list(cache.directory.glob("*.tmp")), [])
+        cache.put("a", b"aa", 1)
+        self.assertEqual(cache.get("a"), (b"aa", 1))
+
+    def test_workers_share_complete_disk_entries_without_pcm_in_index(self):
+        cache = self.disk_cache()
+
+        def write_and_read(index):
+            key = ("voice" + str(index % 2), "在北港，")
+            pcm = bytes([index % 2, 0]) * 24000
+            cache.put(key, pcm, 16)
+            self.assertEqual(cache.get(key), (pcm, 16))
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(write_and_read, range(20)))
+        self.assertEqual(len(cache._entries), 2)
+        self.assertEqual(list(cache.directory.glob("*.tmp")), [])
+        restored = self.disk_cache()
+        for voice in ("voice0", "voice1"):
+            self.assertEqual(cache.get((voice, "在北港，")), restored.get((voice, "在北港，")))
 
     def test_pcm16_clips_and_rejects_nonfinite(self):
         values = np.frombuffer(pcm16(np.array([-2, -1, 0, 1, 2], np.float32)), dtype="<i2")

@@ -101,16 +101,6 @@ class Runtime:
         phrase_mode = os.environ.get("M5_ALERT_PHRASES", "on")
         if phrase_mode not in ("on", "off"):
             raise ValueError("M5_ALERT_PHRASES 必须为 on 或 off")
-        self.alert_phrases = {}
-        self.field_cache = None
-        if phrase_mode == "on":
-            cache_mb = int(os.environ.get("M5_ALERT_FIELD_CACHE_MB", "0"))
-            if cache_mb < 0:
-                raise ValueError("M5_ALERT_FIELD_CACHE_MB 必须为非负整数")
-            if cache_mb:
-                self.field_cache = shared_field_cache or AlertFieldCache(cache_mb * 1024**2)
-            self.alert_phrases = (self._prepare_alert_phrases() if shared_alert_phrases is None
-                                  else shared_alert_phrases)
         identity = {
             "backend": "m5-cpu", "assets": assets, "voices": identity_voices,
             "default_voice": self.default_voice, "threads": self.threads,
@@ -127,23 +117,52 @@ class Runtime:
             identity["normalizer_packages"] = {name: importlib.metadata.version(name)
                                                for name in ("pynini", "WeTextProcessing")}
         self.identity = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        self.cache_identities = {}
+        for voice, definition in identity_voices.items():
+            per_voice = dict(identity, voices={voice: definition})
+            per_voice.pop("default_voice")
+            self.cache_identities[voice] = hashlib.sha256(json.dumps(per_voice, sort_keys=True).encode()).hexdigest()
+        self.alert_phrases = None
+        self.field_cache = None
+        if phrase_mode == "on":
+            directory = Path(os.environ.get("M5_ALERT_CACHE_DIR", "cache/m5-alerts"))
+            cache_mb = int(os.environ.get("M5_ALERT_FIELD_CACHE_MB", "0"))
+            if cache_mb < 0:
+                raise ValueError("M5_ALERT_FIELD_CACHE_MB 必须为非负整数")
+            if cache_mb:
+                self.field_cache = shared_field_cache or AlertFieldCache(directory / "fields", cache_mb * 1024**2)
+            self.alert_phrases = shared_alert_phrases or AlertFieldCache(directory / "phrases")
+            if shared_alert_phrases is None:
+                self._prepare_alert_phrases()
+            logging.info("告警磁盘缓存已启用 path=%s field_cache_mb=%d", directory.resolve(), cache_mb)
         self.model_name = root.name
         logging.info("M5 CPU 已就绪 identity=%s voices=%s normalization=%s",
                      self.identity, list(self.voices), self.normalization)
 
     def _prepare_alert_phrases(self):
-        result = {}
-        for voice, spec in self.voices.items():
-            phrases = {}
+        for voice in self.voices:
+            reused = 0
             for phrase in ALERT_PHRASES:
-                text = phrase + "。" if phrase in ALERT_ENDINGS else phrase
-                budget = min(1024, self._frame_budget(text, spec, "Chinese"))
-                pcm = b"".join(self._generate_text(text, spec, "Chinese", budget))
-                pcm = b"".join(trim_alert_edges([pcm], silence_threshold(pcm)))
-                phrases[phrase] = (pcm, self.model.stats["frames"])
-            result[voice] = phrases
-            logging.info("告警短语预生成完成 voice=%s phrases=%d", voice, len(phrases))
-        return result
+                key = (self.cache_identities[voice], phrase)
+                if self.alert_phrases.get(key) is None:
+                    self._alert_phrase(voice, phrase)
+                else:
+                    reused += 1
+            logging.info("告警短语预生成完成 voice=%s phrases=%d disk_hits=%d generated=%d",
+                         voice, len(ALERT_PHRASES), reused, len(ALERT_PHRASES) - reused)
+
+    def _alert_phrase(self, voice, phrase):
+        key = (self.cache_identities[voice], phrase)
+        entry = self.alert_phrases.get(key)
+        if entry is None:
+            spec = self.voices[voice]
+            text = phrase + "。" if phrase in ALERT_ENDINGS else phrase
+            budget = min(1024, self._frame_budget(text, spec, "Chinese"))
+            pcm = b"".join(self._generate_text(text, spec, "Chinese", budget))
+            pcm = b"".join(trim_alert_edges([pcm], silence_threshold(pcm)))
+            entry = (pcm, self.model.stats["frames"])
+            self.alert_phrases.put(key, *entry)
+        return entry
 
     def _frame_budget(self, text, spec, language):
         normalized = text_normalization.normalize_text(text, lang=language)
@@ -156,20 +175,27 @@ class Runtime:
     def generate(self, text: str, voice: str, language: str):
         spec = self.voices[voice]
         budget = min(self.max_frames, self._frame_budget(text, spec, language))
-        phrases = self.alert_phrases.get(voice) if language == "Chinese" else None
-        if phrases:
+        if self.alert_phrases is not None and language == "Chinese":
             ending_only = text.strip().removesuffix("。").rstrip()
-            if ending_only in ALERT_ENDINGS and phrases[ending_only][1] <= budget:
-                yield phrases[ending_only][0]
-                return
+            if ending_only in ALERT_ENDINGS:
+                pcm, frames = self._alert_phrase(voice, ending_only)
+                if frames <= budget:
+                    yield pcm
+                    return
             parts = alert_parts(text)
             if parts:
-                subject, kind, ending = parts
+                ship, area, kind, ending = parts
+                phrases = {p: self._alert_phrase(voice, p) for p in ("发现", "触发", ending)}
                 remaining = budget - sum(phrases[p][1] for p in ("发现", "触发", ending))
-                if remaining > 2 * self.model.meta["min_frames"]:
+                if remaining > (3 if area else 2) * self.model.meta["min_frames"]:
                     threshold = silence_threshold(phrases["发现"][0])
-                    frames = yield from self._alert_field(subject, voice, remaining, threshold, phrases["发现"][0])
+                    frames = yield from self._alert_field(ship, voice, remaining, threshold, phrases["发现"][0])
                     remaining -= frames
+                    if area:
+                        if remaining <= 0:
+                            raise RuntimeError("生成预算耗尽，音频不完整")
+                        frames = yield from self._alert_field(area, voice, remaining, threshold)
+                        remaining -= frames
                     if remaining <= 0:
                         raise RuntimeError("生成预算耗尽，音频不完整")
                     yield phrases["触发"][0]
@@ -181,11 +207,12 @@ class Runtime:
     def _alert_field(self, field, voice, remaining, threshold, prefix=b""):
         spec = self.voices[voice]
         limit = min(remaining, self._frame_budget(field, spec, "Chinese"))
-        key = (voice, field)
+        key = (self.cache_identities[voice], field)
         cache = self.field_cache
         entry = cache.get(key) if cache is not None else None
         if entry is not None and entry[1] <= limit:
             pcm, frames = entry
+            logging.info("告警字段磁盘缓存命中 voice=%s field=%s", voice, field)
             yield prefix + pcm
             return frames
 
