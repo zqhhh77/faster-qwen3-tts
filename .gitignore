@@ -6,6 +6,7 @@
 references/*
 !references/README.md
 !references/voices.example.json
+!references/edge-voices.example.json
 *.pcm
 *.log
 *.exe

@@ -1,6 +1,6 @@
 # tdt-tts 流式网关 HTTP API
 
-网关默认地址为 `http://127.0.0.1:8000`。只有 gateway 对外提供接口，vLLM 或 M5 gRPC 服务留在容器网络。服务端选择后端，客户端不传 model；接口和音频协议保持一致。M5 运行与音色配置见 [M5 CPU 后端](m5.md)。
+网关默认地址为 `http://127.0.0.1:8000`。由服务端选择 Qwen3、M5 或 Edge TTS 后端，客户端通过 Gateway 调用统一接口。音色配置见 [M5 CPU 后端](m5.md) 和 [Edge TTS 后端](edge.md)。
 
 所有普通 JSON 响应使用：
 
@@ -38,9 +38,26 @@ code 与 HTTP 状态码一致，message 为中文。列表返回顶层 rows，�
 | language | 默认 Chinese，忽略大小写；可查询 health 中的 languages |
 | instruct | 默认空，最多 512 字符；仅 1.7B CustomVoice 接受非空值 |
 | speed | 当前只支持 1.0 |
-| response_format | pcm_framed（默认）或 pcm；`/v1/audio/speech/sse` 始终输出 SSE |
+| stream | 默认 true。对 `/v1/audio/speech` 传 false 可获取完整 WAV。SSE 接口要求 true |
+| response_format | 流式 PCM 支持 pcm_framed（默认）和 pcm。非流式请求省略该字段 |
 
 未知字段、重复 JSON 字段、非法类型和超过 32 KiB 的请求体被拒绝。使用 `voice` 字段，不是 `viose`。
+
+## 非流式 WAV
+
+`POST /v1/audio/speech` 请求体示例
+
+```json
+{"input":"前方船舶请注意安全。","stream":false}
+```
+
+完整合成后返回 HTTP 200。
+
+```json
+{"code":200,"message":"语音生成成功","data":{"format":"wav","sample_rate":24000,"audio_b64":"BASE64_WAV"}}
+```
+
+`data.audio_b64` 解码后是完整的 24 kHz 单声道 16 位 PCM WAV。生成失败时返回 HTTP 503 和中文 JSON，`data` 为 `null`。相同合成参数的流式和非流式请求可以共享生成任务和缓存。
 
 ## 带完成标记的 PCM
 

@@ -90,6 +90,10 @@ func TestHTTPStreamsShareDiskAndWrapErrors(t *testing.T) {
 				t.Error("invalid upstream request", req)
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
+			if req["input"] == "中断测试" {
+				fmt.Fprint(w, "event: speech.audio.delta\ndata: {\"type\":\"speech.audio.delta\",\"audio\":\"AQIDBA==\",\"response_format\":\"pcm\"}\n\n")
+				return
+			}
 			fmt.Fprint(w, "event: speech.audio.delta\ndata: {\"type\":\"speech.audio.delta\",\"audio\":\"AQIDBA==\",\"response_format\":\"pcm\"}\n\nevent: speech.audio.done\ndata: {\"type\":\"speech.audio.done\"}\n\n")
 		default:
 			w.WriteHeader(404)
@@ -155,10 +159,33 @@ func TestHTTPStreamsShareDiskAndWrapErrors(t *testing.T) {
 			}
 		}
 	}
+	code, body = post("/v1/audio/speech", `{"input":"你好","stream":false}`)
+	var complete struct {
+		Code int `json:"code"`
+		Data struct {
+			Format     string `json:"format"`
+			SampleRate int    `json:"sample_rate"`
+			Audio      []byte `json:"audio_b64"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &complete); err != nil || code != 200 || complete.Code != code ||
+		complete.Data.Format != "wav" || complete.Data.SampleRate != 24000 ||
+		!bytes.Equal(complete.Data.Audio, wav([]byte{1, 2, 3, 4})) {
+		t.Fatalf("non-streaming WAV: %d %s", code, body)
+	}
 	if calls.Load() != 1 {
 		t.Fatalf("cache missed across transports: %d", calls.Load())
 	}
-	for _, bad := range []string{`{}`, `{"input":" "}`, `{"input":"x","speed":2}`, `{"input":"x","extra":1}`, `{"input":"x","input":"y"}`, `{"input":"x","language":null}`, `{"input":"x"} {}`} {
+	code, body = post("/v1/audio/speech", `{"input":"中断测试","stream":false}`)
+	var failed envelope
+	if err := json.Unmarshal(body, &failed); err != nil || code != 503 || failed.Code != code || failed.Data != nil {
+		t.Fatalf("incomplete non-streaming response: %d %s", code, body)
+	}
+	code, _ = post("/v1/audio/speech/sse", `{"input":"你好","stream":false}`)
+	if code != 400 {
+		t.Fatalf("non-streaming SSE: %d", code)
+	}
+	for _, bad := range []string{`{}`, `{"input":" "}`, `{"input":"x","speed":2}`, `{"input":"x","extra":1}`, `{"input":"x","input":"y"}`, `{"input":"x","language":null}`, `{"input":"x"} {}`, `{"input":"x","stream":"false"}`, `{"input":"x","stream":false,"response_format":"pcm"}`} {
 		code, body = post("/v1/audio/speech", bad)
 		var e envelope
 		if err = json.Unmarshal(body, &e); err != nil || code != 400 || e.Code != code || e.Message == "" {

@@ -58,6 +58,7 @@ python examples/http_streaming_client.py --url http://127.0.0.1:8000 \
 
 - [Linux 部署、hfd 下载、升级与配置](docs/deployment.md)
 - [内置音色与多个自定义音色](docs/voices.md)
+- [Edge TTS 部署、音色映射和流式与非流式调用](docs/edge.md)
 - [HTTP、PCM 帧和 SSE 接口](docs/api.md)
 - [模块职责、并发与缓存语义](docs/architecture.md)
 

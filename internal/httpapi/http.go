@@ -32,8 +32,13 @@ func reply(w http.ResponseWriter, code int, message string, data any) {
 	_ = json.NewEncoder(w).Encode(envelope{code, message, data})
 }
 
-func decodeRequest(w http.ResponseWriter, r *http.Request) (engine.Request, error) {
-	req := engine.Request{Language: "Chinese", Speed: 1, Format: "pcm_framed"}
+type speechRequest struct {
+	engine.Request
+	stream bool
+}
+
+func decodeRequest(w http.ResponseWriter, r *http.Request) (speechRequest, error) {
+	req := speechRequest{Request: engine.Request{Language: "Chinese", Speed: 1, Format: "pcm_framed"}, stream: true}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 32768))
 	if err != nil || !utf8.Valid(body) {
 		return req, errors.New("请求体过大或编码无效")
@@ -77,6 +82,8 @@ func decodeRequest(w http.ResponseWriter, r *http.Request) (engine.Request, erro
 			e = json.Unmarshal(value, &req.Speed)
 		case "response_format":
 			e = json.Unmarshal(value, &req.Format)
+		case "stream":
+			e = json.Unmarshal(value, &req.stream)
 		default:
 			return req, errors.New("请求包含未知字段")
 		}
@@ -95,6 +102,9 @@ func decodeRequest(w http.ResponseWriter, r *http.Request) (engine.Request, erro
 	}
 	if strings.TrimSpace(req.Input) == "" || utf8.RuneCountInString(req.Input) > 2048 || utf8.RuneCountInString(req.Voice) > 128 || len(req.Language) == 0 || utf8.RuneCountInString(req.Language) > 32 || utf8.RuneCountInString(req.Instruct) > 512 || req.Speed != 1 || (req.Format != "pcm" && req.Format != "pcm_framed") {
 		return req, errors.New("文本、音色、语言、指令、语速或输出格式无效")
+	}
+	if !req.stream && seen["response_format"] {
+		return req, errors.New("非流式合成固定返回 WAV，请省略 response_format")
 	}
 	return req, nil
 }
@@ -253,7 +263,11 @@ func (g *Handler) speech(w http.ResponseWriter, r *http.Request, asSSE bool, tra
 		reply(w, 400, "请求参数校验失败", map[string]string{"detail": err.Error()})
 		return
 	}
-	params, _ := json.Marshal(req)
+	if asSSE && !req.stream {
+		reply(w, 400, "SSE 接口必须使用流式合成", nil)
+		return
+	}
+	params, _ := json.Marshal(req.Request)
 	log.Printf("请求参数 trackid=%s params=%s", trackID, params)
 	info, err := g.b.Info(r.Context())
 	allowNew := err == nil
@@ -268,16 +282,20 @@ func (g *Handler) speech(w http.ResponseWriter, r *http.Request, asSSE bool, tra
 			return
 		}
 	}
-	if code, msg := resolve(&req, info); code != 0 {
+	if code, msg := resolve(&req.Request, info); code != 0 {
 		reply(w, code, msg, nil)
 		return
 	}
-	rec, err := g.cache.Acquire(engine.Key(req, info), req, info, allowNew)
+	rec, err := g.cache.Acquire(engine.Key(req.Request, info), req.Request, info, allowNew)
 	if err != nil {
 		reply(w, 503, err.Error(), nil)
 		return
 	}
 	defer g.cache.Release(rec)
+	if !req.stream {
+		g.completeSpeech(w, r, rec)
+		return
+	}
 	buffer := make([]byte, 262144)
 	n, err := g.cache.Read(r.Context(), rec, 0, buffer)
 	if err != nil {
@@ -349,6 +367,28 @@ func (g *Handler) speech(w http.ResponseWriter, r *http.Request, asSSE bool, tra
 	} else {
 		panic(http.ErrAbortHandler)
 	}
+}
+
+func (g *Handler) completeSpeech(w http.ResponseWriter, r *http.Request, rec *cache.Record) {
+	var pcm bytes.Buffer
+	buffer := make([]byte, 262144)
+	for {
+		n, err := g.cache.Read(r.Context(), rec, int64(pcm.Len()), buffer)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			reply(w, 503, "语音生成失败或请求已取消", nil)
+			return
+		}
+		pcm.Write(buffer[:n])
+	}
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Now().Add(g.c.Send))
+	defer rc.SetWriteDeadline(time.Time{})
+	reply(w, 200, "语音生成成功", map[string]any{
+		"format": "wav", "sample_rate": 24000, "audio_b64": wav(pcm.Bytes()),
+	})
 }
 
 func New(c config.Config, b engine.Backend, store *cache.Store) *Handler {

@@ -22,7 +22,7 @@ type m5Client struct {
 	concurrency int
 }
 
-func newM5(c config.Config) (*m5Client, error) {
+func newGRPC(c config.Config) (*m5Client, error) {
 	conn, err := grpc.NewClient("passthrough:///"+c.GRPCAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(1<<20)))

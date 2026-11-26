@@ -77,7 +77,7 @@ func TestM5StreamingCompletion(t *testing.T) {
 			pb.RegisterInferenceServiceServer(server, service)
 			go server.Serve(listener)
 			t.Cleanup(server.Stop)
-			client, err := newM5(config.Config{GRPCAddr: listener.Addr().String(), Concurrency: 1})
+			client, err := newGRPC(config.Config{GRPCAddr: listener.Addr().String(), Concurrency: 1})
 			if err != nil {
 				t.Fatal(err)
 			}

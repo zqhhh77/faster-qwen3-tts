@@ -1,0 +1,43 @@
+services:
+  edge-backend:
+    image: ${TTS_IMAGE_PREFIX:-ghcr.io/zqhhh77/faster-qwen3-tts}-edge:${TTS_IMAGE_TAG:-edge}
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.edge
+    restart: unless-stopped
+    environment:
+      EDGE_TTS_VOICES_FILE: /config/voices.json
+      EDGE_TTS_WORKERS: ${EDGE_TTS_WORKERS:-4}
+      EDGE_TTS_PROXY: "${EDGE_TTS_PROXY:-}"
+    volumes:
+      - type: bind
+        source: "${EDGE_TTS_VOICES_FILE:?请设置本地 Edge 音色映射文件}"
+        target: /config/voices.json
+        read_only: true
+        bind:
+          create_host_path: false
+    expose: ["50051"]
+    stop_grace_period: 15s
+
+  gateway:
+    image: ${TTS_IMAGE_PREFIX:-ghcr.io/zqhhh77/faster-qwen3-tts}-gateway:${TTS_IMAGE_TAG:-edge}
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.gateway
+    restart: unless-stopped
+    depends_on:
+      - edge-backend
+    ports:
+      - "${TTS_BIND_ADDRESS:-127.0.0.1}:${TTS_PORT:-8000}:8000"
+    environment:
+      TTS_BACKEND_TYPE: edge
+      TTS_BACKEND_GRPC_ADDR: edge-backend:50051
+      TTS_MAX_CONCURRENT_TASKS: ${EDGE_TTS_WORKERS:-4}
+    volumes:
+      - ${TTS_CACHE_HOST_DIR:-./cache}:/cache
+    healthcheck:
+      test: ["CMD", "/gateway", "healthcheck"]
+      interval: 10s
+      timeout: 9s
+      retries: 3
+    stop_grace_period: 15s

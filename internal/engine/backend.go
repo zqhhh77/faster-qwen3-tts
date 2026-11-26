@@ -14,8 +14,8 @@ type Backend interface {
 }
 
 func Open(c config.Config) (Backend, error) {
-	if c.BackendType == "m5" {
-		return newM5(c)
+	if c.BackendType == "m5" || c.BackendType == "edge" {
+		return newGRPC(c)
 	}
 	return New(c), nil
 }

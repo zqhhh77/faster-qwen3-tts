@@ -1,0 +1,4 @@
+services:
+  edge-backend:
+    extra_hosts:
+      speech.platform.bing.com: "${EDGE_TTS_MOTO_HOST:?请设置 Moto 的 IP 地址}"

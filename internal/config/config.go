@@ -28,9 +28,13 @@ func env(name, fallback string) string {
 func Load() (Config, error) {
 	c := Config{Addr: env("TTS_LISTEN", ":8000"), Backend: env("TTS_BACKEND_URL", "http://backend:8001"), State: env("TTS_BACKEND_STATE", "/state/backend.json"), Directory: env("TTS_CACHE_DIR", "/cache/audio")}
 	c.BackendType = env("TTS_BACKEND_TYPE", "qwen3")
-	c.GRPCAddr = env("TTS_BACKEND_GRPC_ADDR", "m5-backend:50051")
-	if c.BackendType != "qwen3" && c.BackendType != "m5" {
-		return c, fmt.Errorf("TTS_BACKEND_TYPE 只能是 qwen3 或 m5")
+	grpcDefault := "m5-backend:50051"
+	if c.BackendType == "edge" {
+		grpcDefault = "edge-backend:50051"
+	}
+	c.GRPCAddr = env("TTS_BACKEND_GRPC_ADDR", grpcDefault)
+	if c.BackendType != "qwen3" && c.BackendType != "m5" && c.BackendType != "edge" {
+		return c, fmt.Errorf("TTS_BACKEND_TYPE 只能是 qwen3、m5 或 edge")
 	}
 	concurrencyDefault := int64(4)
 	if c.BackendType == "m5" {
@@ -58,10 +62,10 @@ func Load() (Config, error) {
 		v.set(n)
 	}
 	c.Output = min(int64(8*1024*1024), c.Capacity)
-	if c.BackendType == "m5" {
-		if c.Concurrency > 32 {
-			return c, fmt.Errorf("M5 的 TTS_MAX_CONCURRENT_TASKS 必须与 M5_WORKERS 一致且不超过 32")
-		}
+	if c.BackendType == "m5" && c.Concurrency > 32 {
+		return c, fmt.Errorf("M5 的 TTS_MAX_CONCURRENT_TASKS 必须与 M5_WORKERS 一致且不超过 32")
+	}
+	if c.BackendType == "m5" || c.BackendType == "edge" {
 		if host, port, err := net.SplitHostPort(c.GRPCAddr); err != nil || host == "" || port == "" {
 			return c, fmt.Errorf("TTS_BACKEND_GRPC_ADDR 必须为 host:port")
 		}
