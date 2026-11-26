@@ -41,17 +41,3 @@ func TestM5Config(t *testing.T) {
 		t.Fatal("accepted invalid gRPC address")
 	}
 }
-
-func TestStartupBuffer(t *testing.T) {
-	for _, tc := range []struct {
-		value string
-		want  int64
-		valid bool
-	}{{"", 0, true}, {"0", 0, true}, {"200", 200, true}, {"1000", 1000, true}, {"-1", 0, false}, {"1001", 0, false}, {"0.2", 0, false}} {
-		t.Setenv("TTS_STARTUP_BUFFER_MS", tc.value)
-		c, err := Load()
-		if (err == nil) != tc.valid || (err == nil && c.StartupBuffer.Milliseconds() != tc.want) {
-			t.Fatalf("value=%q config=%+v err=%v", tc.value, c, err)
-		}
-	}
-}

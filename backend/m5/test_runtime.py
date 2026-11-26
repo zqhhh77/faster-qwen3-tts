@@ -115,7 +115,6 @@ class RuntimeTests(unittest.TestCase):
 
     def test_alert_audio_uses_selected_voice_and_only_generates_fields(self):
         runtime = Runtime.__new__(Runtime)
-        runtime.alert_mode = "on"
         runtime.field_cache = AlertFieldCache(1 << 20)
         runtime.model = SimpleNamespace(meta={"min_frames": 6}, stats={})
         runtime.max_frames = 100
@@ -176,7 +175,6 @@ class RuntimeTests(unittest.TestCase):
 
     def test_alert_prefix_streams_before_subject_finishes_and_releases_generator_on_cancel(self):
         runtime = Runtime.__new__(Runtime)
-        runtime.alert_mode = "on"
         runtime.field_cache = AlertFieldCache(1 << 20)
         runtime.model = SimpleNamespace(meta={"min_frames": 6})
         runtime.max_frames = 100

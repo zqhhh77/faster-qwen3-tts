@@ -91,7 +91,6 @@ docker compose -f compose.images.yaml up -d --force-recreate
 | `TTS_MAX_READERS` | 256 | 同时读取音频的客户端数量 |
 | `TTS_TASK_TIMEOUT_SECONDS` | 120 | 入队到完成的总时限 |
 | `TTS_SEND_TIMEOUT_SECONDS` | 15 | 每次向客户端写入/刷新数据的时限 |
-| `TTS_STARTUP_BUFFER_MS` | 0 | 收到首块后的额外开播缓冲，范围 0～1000 毫秒；后台继续生成，完整缓存命中跳过等待 |
 
 不同请求最多受并发数、等待数和磁盘预算共同限制。例如 4 并发 + 8 等待时，最多 12 个不同任务；相同请求共享任务，但各自占用一个 reader。每个未完成任务按最多 8 MB 预留，因此把并发/等待配置调大时也需考虑缓存预算。
 

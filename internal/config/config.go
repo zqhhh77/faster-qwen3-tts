@@ -16,7 +16,6 @@ type Config struct {
 	Concurrency, Pending, Readers   int
 	Capacity, Output                int64
 	TTL, Task, Send, Sweep          time.Duration
-	StartupBuffer                   time.Duration
 }
 
 func env(name, fallback string) string {
@@ -49,7 +48,6 @@ func Load() (Config, error) {
 		{"TTS_CACHE_TTL_SECONDS", 300, 1, 31536000, func(n int64) { c.TTL = time.Duration(n) * time.Second }},
 		{"TTS_TASK_TIMEOUT_SECONDS", 120, 1, 86400, func(n int64) { c.Task = time.Duration(n) * time.Second }},
 		{"TTS_SEND_TIMEOUT_SECONDS", 15, 1, 3600, func(n int64) { c.Send = time.Duration(n) * time.Second }},
-		{"TTS_STARTUP_BUFFER_MS", 0, 0, 1000, func(n int64) { c.StartupBuffer = time.Duration(n) * time.Millisecond }},
 		{"TTS_CACHE_CLEANUP_SECONDS", 5, 1, 3600, func(n int64) { c.Sweep = time.Duration(n) * time.Second }},
 	}
 	for _, v := range values {

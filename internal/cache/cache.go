@@ -360,32 +360,6 @@ func (c *Store) Release(r *Record) {
 	}
 }
 
-// WaitStartup 只延后读者开播，生产者继续填充缓存；完成或失败时提前结束。
-func (c *Store) WaitStartup(ctx context.Context, r *Record, delay time.Duration) error {
-	if delay <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	for {
-		c.mu.Lock()
-		done, err, changed := r.done, r.err, r.changed
-		c.mu.Unlock()
-		if err != nil || done {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-c.ctx.Done():
-			return errors.New("网关正在关闭")
-		case <-changed:
-		case <-timer.C:
-			return nil
-		}
-	}
-}
-
 func (c *Store) Read(ctx context.Context, r *Record, offset int64, buffer []byte) (int, error) {
 	for {
 		c.mu.Lock()

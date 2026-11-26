@@ -135,32 +135,11 @@ def resolve_requests(requests, info, voice, language):
     return resolved
 
 
-def playback(chunks, prebuffer_ms=0, complete_s=None):
-    if not math.isfinite(prebuffer_ms) or not 0 <= prebuffer_ms <= 1000:
-        raise ValueError("开播缓冲必须为 0～1000 毫秒")
-    first = chunks[0]["at_s"] + prebuffer_ms / 1000
-    if complete_s is not None:
-        first = min(first, complete_s)
-    end = first
-    underruns = 0
-    stall_s = max_stall_s = 0.0
-    for chunk in chunks:
-        arrived = max(first, chunk["at_s"])
-        gap = max(0.0, arrived - end)
-        if gap > 0:
-            underruns += 1
-            stall_s += gap
-            max_stall_s = max(max_stall_s, gap)
-        end = max(end, arrived) + chunk["audio_s"]
-    return dict(first_s=first, underruns=underruns, stall_s=stall_s, max_stall_s=max_stall_s)
-
-
-def stream_request(stub, info, text, voice, language, timeout, *, trace=False, prebuffer_ms=None):
-    if prebuffer_ms is not None and (not math.isfinite(prebuffer_ms) or not 0 <= prebuffer_ms <= 1000):
-        raise ValueError("开播缓冲必须为 0～1000 毫秒")
+def stream_request(stub, info, text, voice, language, timeout):
     started = time.perf_counter()
     first, samples, done = None, 0, False
-    chunks = []
+    underruns = 0
+    stall_s = max_stall_s = 0.0
     call = stub.Synthesize(pb.SynthesizeRequest(input=text, voice=voice, language=language,
                             speed=1, expected_identity=info.identity), timeout=timeout)
     try:
@@ -174,7 +153,13 @@ def stream_request(stub, info, text, voice, language, timeout, *, trace=False, p
                 arrived = time.perf_counter()
                 if first is None:
                     first = arrived
-                chunks.append(dict(at_s=arrived-started, audio_s=len(event.audio)/48000, bytes=len(event.audio)))
+                else:
+                    # Playback includes all previously received samples and resumes after each gap.
+                    gap = arrived - (first + samples / 24000 + stall_s)
+                    if gap > 0:
+                        underruns += 1
+                        stall_s += gap
+                        max_stall_s = max(max_stall_s, gap)
                 samples += len(event.audio) // 2
             elif kind == "done":
                 if not samples or samples != event.done.samples:
@@ -185,22 +170,13 @@ def stream_request(stub, info, text, voice, language, timeout, *, trace=False, p
         if not done or call.code() != grpc.StatusCode.OK:
             raise ValueError("缺少成功完成标记")
         finished = time.perf_counter()
-        timing = playback(chunks)
-        timing.pop("first_s")
-        result = dict(first_at=first, finished_at=finished, audio_s=samples / 24000,
-                      inference_s=finished-started, **timing)
-        if trace:
-            result["chunks"] = chunks
-        if prebuffer_ms is not None:
-            result["buffered"] = dict(prebuffer_ms=prebuffer_ms,
-                                      **playback(chunks, prebuffer_ms, finished-started))
-            result["buffered"]["first_at"] = started + result["buffered"].pop("first_s")
-        return result
+        return dict(first_at=first, finished_at=finished, audio_s=samples / 24000,
+                    inference_s=finished - started, underruns=underruns, stall_s=stall_s, max_stall_s=max_stall_s)
     finally:
         call.cancel()
 
 
-def batch(stub, info, requests, timeout, cancel=None, *, trace=False, prebuffer_ms=None):
+def batch(stub, info, requests, timeout, cancel=None):
     # Mirror the gateway's bounded dispatch: excess requests wait, and queue time counts toward latency/deadline.
     slots = threading.Semaphore(info.concurrency)
     ready = threading.Barrier(len(requests) + 1)
@@ -215,18 +191,11 @@ def batch(stub, info, requests, timeout, cancel=None, *, trace=False, prebuffer_
             remaining = timeout - (dispatched - submitted)
             if remaining <= 0:
                 raise TimeoutError("等待推理槽位超时")
-            result = stream_request(stub, info, request["input"], request["voice"], request["language"], remaining,
-                                    trace=trace, prebuffer_ms=prebuffer_ms)
-            row = dict(ok=True, first_s=result["first_at"] - submitted,
+            result = stream_request(stub, info, request["input"], request["voice"], request["language"], remaining)
+            return dict(ok=True, first_s=result["first_at"] - submitted,
                         complete_s=result["finished_at"] - submitted, queue_s=dispatched - submitted,
                         audio_s=result["audio_s"], inference_s=result["inference_s"], underruns=result["underruns"],
                         stall_s=result["stall_s"], max_stall_s=result["max_stall_s"])
-            if trace:
-                row.update(voice=request["voice"], input=request["input"], chunks=result["chunks"])
-            if "buffered" in result:
-                row["buffered"] = result["buffered"]
-                row["buffered"]["first_s"] = row["buffered"].pop("first_at") - submitted
-            return row
         except (grpc.RpcError, ValueError, TimeoutError) as exc:
             return dict(ok=False, error=str(exc))
         finally:

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -17,8 +18,6 @@ import wave
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from backend.m5.processes import ProcessTree
-from backend.m5.tune import playback
-from examples.http_streaming_client import receive_frames
 
 
 def free_port():
@@ -33,11 +32,7 @@ def main():
     parser.add_argument("--gateway", default=".cache/gateway.exe" if os.name == "nt" else ".cache/gateway")
     parser.add_argument("--output", default=".cache/m5-check")
     parser.add_argument("--workers", type=int, default=1)
-    parser.add_argument("--text", default="你好，欢迎使用语音合成服务。", help="真实模型检查使用的正文")
-    parser.add_argument("--startup-buffer-ms", type=int, default=0, help="网关首块到达后的额外开播缓冲，0～1000 毫秒")
     args = parser.parse_args()
-    if not 0 <= args.startup_buffer_ms <= 1000:
-        parser.error("startup-buffer-ms 必须为 0～1000")
     root = Path(__file__).resolve().parents[1]
     output = (root / args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -53,7 +48,6 @@ def main():
                M5_VOICES_FILE=str(voice_file),
                TTS_BACKEND_TYPE="m5", TTS_BACKEND_GRPC_ADDR=f"127.0.0.1:{grpc_port}",
                TTS_LISTEN=f"127.0.0.1:{http_port}", TTS_MAX_CONCURRENT_TASKS=str(args.workers),
-               TTS_STARTUP_BUFFER_MS=str(args.startup_buffer_ms),
                TTS_TASK_TIMEOUT_SECONDS="120", PYTHONUTF8="1", PYTHONUNBUFFERED="1")
     processes = []
     started = time.perf_counter()
@@ -88,7 +82,7 @@ def main():
                 voices = json.load(response)
             assert voices["rows"] == [{"voice": "alternate", "type": "Base", "default": False},
                                        {"voice": "default", "type": "Base", "default": True}], voices
-            request = {"input": args.text}
+            request = {"input": "你好，欢迎使用语音合成服务。"}
 
             def framed(voice=None):
                 payload = dict(request)
@@ -99,14 +93,25 @@ def main():
                                              headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(req, timeout=120) as response:
                     assert response.headers["X-Audio-Sample-Format"] == "s16le"
-                    audio, chunks = bytearray(), []
-                    for block in receive_frames(response):
-                        chunks.append(dict(at_s=time.perf_counter()-sent, audio_s=len(block)/48000, bytes=len(block)))
+                    first = response.read(5)
+                    first_at = time.perf_counter() - sent
+                    body = first + response.read()
+                offset, audio, done = 0, bytearray(), False
+                while offset < len(body):
+                    kind, size = struct.unpack_from(">BI", body, offset)
+                    offset += 5
+                    block = body[offset:offset + size]
+                    assert len(block) == size
+                    offset += size
+                    if kind == 1:
+                        assert not done and size and size % 2 == 0
                         audio.extend(block)
-                assert audio
-                first_at = chunks[0]["at_s"]
+                    else:
+                        assert kind == 2 and size == 0 and not done, body[offset:offset + 200]
+                        done = True
+                assert done and audio
                 finished = time.perf_counter()
-                return bytes(audio), first_at, finished - sent, sent + first_at, finished, chunks
+                return bytes(audio), first_at, finished - sent, sent + first_at, finished
 
             selected = (None, "default", "alternate") if args.workers > 1 else (None, "default")
             with ThreadPoolExecutor(max_workers=len(selected)) as pool:
@@ -151,10 +156,7 @@ def main():
                           cache_first_audio_s=cached[1], audio_s=len(a[0])/48000,
                           shared_requests=2, preloaded_voices_per_worker=2, workers=args.workers, inference_runs=2,
                           transports=["pcm_framed", "pcm", "sse"],
-                          identity=health["data"]["backend"]["identity"], input=args.text,
-                          startup_buffer_ms=args.startup_buffer_ms,
-                          requests=[dict(voice=voice or "default", complete_s=row[2],
-                                         **playback(row[5]), chunks=row[5]) for voice, row in zip(selected, results)])
+                          identity=health["data"]["backend"]["identity"])
             (output / "results.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             print(json.dumps(result, ensure_ascii=False, indent=2))
         finally:
