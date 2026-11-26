@@ -299,6 +299,14 @@ class M5Onnx:
                 if last_batch:
                     break
                 end = ahead.result() if ahead is not None else generate_batch(chunk_frames)
+            # 正常结束时保留最后 100 ms，短编号的尾音可能仍在其中。
+            if eos and len(pending):
+                if not np.isfinite(pending).all():
+                    raise RuntimeError("Codec returned non-finite PCM")
+                if first_pcm_s is None:
+                    first_pcm_s = time.perf_counter() - started
+                emitted += len(pending)
+                yield pending
         finally:
             if executor is not None:
                 # Finish at most one in-flight batch before the worker can serve another voice.

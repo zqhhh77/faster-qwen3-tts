@@ -9,12 +9,15 @@ import logging
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 import time
 
 import numpy as np
 
-from .alert_phrases import ALERT_ENDINGS, ALERT_PHRASES, AlertFieldCache, alert_parts, silence_threshold, trim_alert_edges
+from .alert_phrases import (ALERT_ENDINGS, ALERT_PHRASES, AlertFieldCache, alert_parts,
+                           silence_threshold, split_ship_number, stretch_number_tail, trim_alert_edges)
 
 VENDOR = Path(__file__).with_name("vendor")
 sys.path.insert(0, str(VENDOR))
@@ -101,11 +104,31 @@ class Runtime:
         phrase_mode = os.environ.get("M5_ALERT_PHRASES", "on")
         if phrase_mode not in ("on", "off"):
             raise ValueError("M5_ALERT_PHRASES 必须为 on 或 off")
+        ship_mode = os.environ.get("M5_ALERT_SHIP_PARTS", "off")
+        if ship_mode not in ("on", "off"):
+            raise ValueError("M5_ALERT_SHIP_PARTS 必须为 on 或 off")
+        self.ship_parts = ship_mode == "on"
+        self.number_tail_speed = float(os.environ.get("M5_ALERT_NUMBER_TAIL_SPEED", "0.65"))
+        if self.number_tail_speed not in (0.5, 0.65, 1):
+            raise ValueError("M5_ALERT_NUMBER_TAIL_SPEED 必须为 0.5、0.65 或 1")
+        self.ffmpeg = None
+        ffmpeg_version = None
+        if self.ship_parts:
+            if phrase_mode != "on" or int(os.environ.get("M5_ALERT_FIELD_CACHE_MB", "0")) <= 0:
+                raise ValueError("船名前缀复用需要 M5_ALERT_PHRASES=on 且 M5_ALERT_FIELD_CACHE_MB 大于 0")
+            if self.number_tail_speed < 1:
+                self.ffmpeg = shutil.which("ffmpeg")
+                if not self.ffmpeg:
+                    raise ValueError("编号尾音延长需要安装 FFmpeg")
+                ffmpeg_version = subprocess.run([self.ffmpeg, "-version"], capture_output=True, check=True,
+                                                timeout=5, text=True).stdout.splitlines()[0]
         identity = {
             "backend": "m5-cpu", "assets": assets, "voices": identity_voices,
             "default_voice": self.default_voice, "threads": self.threads,
             "max_frames": self.max_frames, "settings": self.settings,
             "normalization": self.normalization, "alert_phrases": phrase_mode,
+            "ship_parts": self.ship_parts, "number_tail_speed": self.number_tail_speed if self.ship_parts else 1,
+            "ffmpeg": ffmpeg_version,
             "source": {str(p.relative_to(Path(__file__).parent)): digest_file(p)
                        for p in (Path(__file__), Path(__file__).with_name("server.py"),
                                  Path(__file__).with_name("alert_phrases.py"),
@@ -138,6 +161,8 @@ class Runtime:
         self.model_name = root.name
         logging.info("M5 CPU 已就绪 identity=%s voices=%s normalization=%s",
                      self.identity, list(self.voices), self.normalization)
+        if self.ship_parts:
+            logging.info("船名前缀复用已启用 number_tail_speed=%s", self.number_tail_speed)
 
     def _prepare_alert_phrases(self):
         for voice in self.voices:
@@ -185,11 +210,25 @@ class Runtime:
             parts = alert_parts(text)
             if parts:
                 ship, area, kind, ending = parts
+                ship_parts = split_ship_number(ship) if self.ship_parts else None
                 phrases = {p: self._alert_phrase(voice, p) for p in ("发现", "触发", ending)}
                 remaining = budget - sum(phrases[p][1] for p in ("发现", "触发", ending))
-                if remaining > (3 if area else 2) * self.model.meta["min_frames"]:
+                if remaining > (2 + bool(area) + bool(ship_parts)) * self.model.meta["min_frames"]:
                     threshold = silence_threshold(phrases["发现"][0])
-                    frames = yield from self._alert_field(ship, voice, remaining, threshold, phrases["发现"][0])
+                    lead = bytearray(phrases["发现"][0])
+                    if ship_parts:
+                        name, ship = ship_parts
+                        with closing(self._alert_field(name, voice, remaining, threshold)) as stream:
+                            while True:
+                                try:
+                                    lead.extend(next(stream))
+                                except StopIteration as finished:
+                                    remaining -= finished.value
+                                    break
+                        if remaining <= 0:
+                            raise RuntimeError("生成预算耗尽，音频不完整")
+                    frames = yield from self._alert_field(ship, voice, remaining, threshold, bytes(lead),
+                                                          number_tail=bool(ship_parts))
                     remaining -= frames
                     if area:
                         if remaining <= 0:
@@ -204,10 +243,12 @@ class Runtime:
                     return
         yield from self._generate_text(text, spec, language, budget)
 
-    def _alert_field(self, field, voice, remaining, threshold, prefix=b""):
+    def _alert_field(self, field, voice, remaining, threshold, prefix=b"", *, number_tail=False):
         spec = self.voices[voice]
         limit = min(remaining, self._frame_budget(field, spec, "Chinese"))
         key = (self.cache_identities[voice], field)
+        if number_tail:
+            key += ("number_tail", self.number_tail_speed)
         cache = self.field_cache
         entry = cache.get(key) if cache is not None else None
         if entry is not None and entry[1] <= limit:
@@ -219,7 +260,10 @@ class Runtime:
         captured = bytearray() if cache is not None else None
         first = bytearray(prefix)
         with closing(self._generate_text(field, spec, "Chinese", limit)) as raw:
-            for chunk in trim_alert_edges(raw, threshold):
+            chunks = trim_alert_edges(raw, threshold)
+            if number_tail:
+                chunks = stretch_number_tail(chunks, self.number_tail_speed, self.ffmpeg)
+            for chunk in chunks:
                 if captured is not None:
                     if len(captured) + len(chunk) <= cache.max_bytes:
                         captured.extend(chunk)

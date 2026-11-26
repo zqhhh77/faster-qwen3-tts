@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 import struct
+import subprocess
 import tempfile
 from collections import OrderedDict
 from threading import Lock
@@ -126,6 +127,45 @@ def alert_parts(text: str):
     if re.search(r"[。！？!?\r\n]", body):
         return None
     return ship + "，", area + "，" if area else "", kind + "，", parts[-1]
+
+
+def split_ship_number(ship):
+    match = re.fullmatch(r"([^零〇一二三四五六七八九幺\d，,。！？!?]+)([零〇一二三四五六七八九幺]{4,8})，", ship)
+    return (match[1], match[2] + "，") if match else None
+
+
+def stretch_number_tail(chunks, speed, ffmpeg):
+    if speed == 1:
+        yield from chunks
+        return
+    # 只保留末尾 240 ms 和 5 ms 拼接余量，前面的音频继续流式发送。
+    overlap, keep = 120, 11760
+    pending = bytearray()
+    for chunk in chunks:
+        pending.extend(chunk)
+        if len(pending) > keep:
+            yield bytes(pending[:-keep])
+            del pending[:-keep]
+    if len(pending) <= overlap * 4:
+        if pending:
+            yield bytes(pending)
+        return
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "s16le", "-ar", "24000", "-ac", "1",
+             "-i", "pipe:0", "-af", f"atempo={speed}", "-f", "s16le", "-c:a", "pcm_s16le", "pipe:1"],
+            input=bytes(pending[overlap * 2:]), capture_output=True, check=True, timeout=5)
+        if len(result.stdout) % 2 or not len(pending) <= len(result.stdout) <= len(pending) * 3:
+            raise ValueError("尾音处理返回的音频长度无效")
+        output = np.frombuffer(result.stdout, dtype="<i2").copy()
+        original = np.frombuffer(pending, dtype="<i2")
+        weights = np.linspace(0, 1, overlap)
+        output[:overlap] = np.rint(original[:overlap] * (1 - weights) + output[:overlap] * weights).astype("<i2")
+        tail = output.tobytes()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        logging.warning("编号尾音延长失败，保留原始音频", exc_info=True)
+        tail = bytes(pending)
+    yield tail
 
 
 def silence_threshold(pcm):

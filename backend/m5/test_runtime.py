@@ -53,7 +53,8 @@ class RuntimeTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.cache_root = Path(directory.name)
-        environment = patch.dict(os.environ, {"M5_ALERT_CACHE_DIR": str(self.cache_root)})
+        environment = patch.dict(os.environ, {"M5_ALERT_CACHE_DIR": str(self.cache_root),
+                                               "M5_ALERT_SHIP_PARTS": "off", "M5_ALERT_NUMBER_TAIL_SPEED": "0.65"})
         environment.start()
         self.addCleanup(environment.stop)
 
@@ -87,6 +88,13 @@ class RuntimeTests(unittest.TestCase):
                         self.assertEqual(first._alert_phrase(voice, phrase), restarted._alert_phrase(voice, phrase))
                 self.assertEqual(len(list((self.cache_root / "phrases").glob("*.pcm"))), 8)
                 self.assertEqual(first.alert_phrases._entries, {})
+                for invalid in ("nan", "0.49", "0.99", "1.1"):
+                    with patch.dict(os.environ, {"M5_ALERT_NUMBER_TAIL_SPEED": invalid}):
+                        with self.assertRaisesRegex(ValueError, "M5_ALERT_NUMBER_TAIL_SPEED"):
+                            Runtime()
+                with patch.dict(os.environ, {"M5_ALERT_SHIP_PARTS": "on"}):
+                    with self.assertRaisesRegex(ValueError, "M5_ALERT_FIELD_CACHE_MB"):
+                        Runtime()
 
     def test_reference_and_model_changes_invalidate_disk_cache(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -163,6 +171,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_alert_audio_uses_selected_voice_and_only_generates_fields(self):
         runtime = Runtime.__new__(Runtime)
+        runtime.ship_parts = False
         runtime.field_cache = self.disk_cache()
         runtime.alert_phrases = self.disk_cache("phrases", None)
         runtime.cache_identities = {"a": "a", "b": "b"}
@@ -216,6 +225,24 @@ class RuntimeTests(unittest.TestCase):
         list(runtime.generate(text, "a", "Chinese"))
         self.assertEqual(calls, [(text, "a", "Chinese", 20)])
 
+        runtime.max_frames = 100
+        runtime.ship_parts = True
+        runtime.number_tail_speed = 1
+        runtime.ffmpeg = None
+        calls.clear()
+        numbered = text.replace("海巡一号", "鲁威渔一五二四零九")
+        list(runtime.generate(numbered, "b", "Chinese"))
+        self.assertEqual([call[0] for call in calls], ["鲁威渔", "一五二四零九，"])
+        calls.clear()
+        list(runtime.generate(numbered.replace("零九", "零八"), "b", "Chinese"))
+        self.assertEqual([call[0] for call in calls], ["一五二四零八，"])
+        calls.clear()
+        list(runtime.generate(numbered.replace("鲁威渔", "浙普渔"), "b", "Chinese"))
+        self.assertEqual([call[0] for call in calls], ["浙普渔"])
+        calls.clear()
+        list(runtime.generate(numbered, "b", "Chinese"))
+        self.assertEqual(calls, [])
+
     def test_alert_silence_trim_preserves_interior_and_soft_clips(self):
         quiet = np.zeros(2400, dtype="<i2").tobytes()
         spoken = np.full(240, -3456, dtype="<i2").tobytes()
@@ -226,6 +253,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_alert_prefix_streams_before_subject_finishes_and_releases_generator_on_cancel(self):
         runtime = Runtime.__new__(Runtime)
+        runtime.ship_parts = False
         runtime.field_cache = self.disk_cache()
         runtime.alert_phrases = self.disk_cache("phrases", None)
         runtime.cache_identities = {"a": "a"}
