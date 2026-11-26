@@ -1,4 +1,13 @@
 services:
   edge-backend:
-    extra_hosts:
-      speech.platform.bing.com: "${EDGE_TTS_MOTO_HOST:?请设置 Moto 的 IP 地址}"
+    depends_on:
+      - moto-relay
+
+  moto-relay:
+    image: ${TTS_IMAGE_PREFIX:-ghcr.io/zqhhh77/faster-qwen3-tts}-edge:${TTS_IMAGE_TAG:-edge}
+    restart: unless-stopped
+    entrypoint: ["socat", "TCP-LISTEN:443,reuseaddr,fork", "TCP:${EDGE_TTS_MOTO_ADDR:?请设置 Moto 地址和端口},connect-timeout=10"]
+    networks:
+      default:
+        aliases:
+          - speech.platform.bing.com

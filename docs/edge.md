@@ -29,7 +29,7 @@ EDGE_TTS_PROXY=http://192.168.10.20:9006
   "rules": [
     {
       "name": "Edge TTS",
-      "listen": "192.168.10.20:443",
+      "listen": "192.168.10.20:9010",
       "mode": "normal",
       "protocol": "tcp",
       "allowlist": ["192.168.10.30/32"],
@@ -39,13 +39,13 @@ EDGE_TTS_PROXY=http://192.168.10.20:9006
 }
 ```
 
-在 Edge 服务器上的 `.env` 设置 `EDGE_TTS_MOTO_HOST=192.168.10.20`，将 `EDGE_TTS_PROXY` 留空，再叠加 Moto 配置启动。
+在 Edge 服务器上的 `.env` 设置 `EDGE_TTS_MOTO_ADDR=192.168.10.20:9010`，将 `EDGE_TTS_PROXY` 留空，再叠加 Moto 配置启动。
 
 ```sh
 docker compose -f compose.edge.yaml -f compose.edge.moto.yaml up -d --pull always --no-build
 ```
 
-该配置让 Edge 容器把 `speech.platform.bing.com` 解析到 Moto 的 IP。客户端继续使用原域名进行 TLS 校验，Moto 转发到微软的 443 端口。Moto 的 HTTP CONNECT 模式用于接入已有的 H2/H3 CONNECT 上游代理。参见 [Moto 部署文档](https://github.com/cppla/moto)。
+该配置启动一个容器内的 TCP 转发服务，把 Edge 的连接送到配置的 Moto 地址。Edge 继续使用微软原域名进行 TLS 校验，Moto 转发到微软的 443 端口。Moto 的 HTTP CONNECT 模式用于接入已有的 H2/H3 CONNECT 上游代理。参见 [Moto 部署文档](https://github.com/cppla/moto)。
 
 两种部署方式都从 GHCR 拉取配套的 `linux/amd64` 镜像。默认使用 `edge` 标签。设置 `TTS_IMAGE_TAG=sha-<完整提交 SHA>` 可固定版本。
 
