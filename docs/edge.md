@@ -2,11 +2,11 @@
 
 Edge TTS 通过微软在线语音服务合成，需要部署环境能访问该服务。后端读取本地 JSON 音色映射表，键是对外名称，值是实际用于合成的 Edge 预设音色短名称。使用 H5 参考录音试听选择预设音色。
 
-复制 [映射表示例](../references/edge-voices.example.json) 并填写实际配置。表中必须包含 `default`，可以删除示例中的 `broadcast` 或添加其他需要公开的音色。仅配置 `default` 时，客户只会查询到这一项。
+首次部署时，复制 [环境变量模板](../.env.edge.example) 为 `.env`，再复制 [映射表示例](../references/edge-voices.example.json) 并填写实际配置。表中必须包含 `default`，可以删除示例中的 `broadcast` 或添加其他需要公开的音色。仅配置 `default` 时，客户只会查询到这一项。已有 `.env` 时，将模板中需要的配置合并到现有文件。
 
 ```powershell
+Copy-Item .env.edge.example .env
 Copy-Item references/edge-voices.example.json references/edge-voices.json
-$env:EDGE_TTS_VOICES_FILE = './references/edge-voices.json'
 docker compose -f compose.edge.yaml up -d --pull always --no-build
 ```
 
