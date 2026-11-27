@@ -20,6 +20,8 @@ class FakeModel:
     tokenizer = SimpleNamespace(encode=lambda text: SimpleNamespace(ids=[1, 2]))
 
     def __init__(self):
+        self.sessions = {"codec_encoder": object()}
+        self.provider_options = {}
         self.encodes = 0
         self.truncated = False
         self.resets = 0
@@ -55,7 +57,7 @@ class RuntimeTests(unittest.TestCase):
         self.cache_root = Path(directory.name)
         environment = patch.dict(os.environ, {"M5_ALERT_CACHE_DIR": str(self.cache_root),
                                                "M5_ALERT_SHIP_PARTS": "off", "M5_ALERT_NUMBER_TAIL_SPEED": "0.65",
-                                               "M5_DEPTH_BATCH": "off"})
+                                               "M5_DEPTH_BATCH": "off", "M5_DEVICE": "cpu", "M5_DEVICE_ID": "0"})
         environment.start()
         self.addCleanup(environment.stop)
 

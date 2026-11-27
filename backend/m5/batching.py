@@ -19,14 +19,15 @@ class DepthBatcher:
 
     @classmethod
     def load(cls, model):
+        from .runtime import create_session, execution_providers
+
         options = ort.SessionOptions()
         options.intra_op_num_threads = min(256, model.threads * 2)
         options.inter_op_num_threads = 1
         options.add_session_config_entry("session.intra_op.allow_spinning", "0")
         options.add_session_config_entry("session.inter_op.allow_spinning", "0")
-        paired = ort.InferenceSession(str(model.root / "depth_frame_pair.onnx"), options,
-                                     providers=["CPUExecutionProvider"])
-        paired.disable_fallback()
+        paired = create_session(model.root / "depth_frame_pair.onnx", options,
+                                execution_providers(model.device, model.device_id), model.provider)
         return cls(model.sessions["depth_frame"], paired)
 
     def run(self, outputs, feed):

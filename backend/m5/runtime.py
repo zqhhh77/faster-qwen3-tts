@@ -1,7 +1,8 @@
-"""One CPU model instance; the service holds its slot for the whole generator."""
+"""One CPU/CUDA model instance; the service holds its slot for the whole generator."""
 from __future__ import annotations
 
 import hashlib
+import copy
 from contextlib import closing
 import importlib.metadata
 import json
@@ -15,13 +16,15 @@ import sys
 import time
 
 import numpy as np
+import onnxruntime as ort
 
 from .alert_phrases import (ALERT_ENDINGS, ALERT_PHRASES, AlertFieldCache, alert_parts,
                            silence_threshold, split_ship_number, stretch_number_tail, trim_alert_edges)
+from .cuda_graph import CudaGraph
 
 VENDOR = Path(__file__).with_name("vendor")
 sys.path.insert(0, str(VENDOR))
-from infer_onnx import FILES, M5Onnx, conditioned_text, read_reference
+from infer_onnx import FILES, M5Onnx, conditioned_text, create_session, execution_providers, read_reference
 import text_normalization
 
 LANGUAGES = ("Chinese", "English", "German", "French", "Japanese", "Korean")
@@ -61,11 +64,23 @@ class Runtime:
     def __init__(self, *, shared_alert_phrases=None, shared_field_cache=None):
         root = Path(os.environ.get("M5_MODEL", "/models/m5")).resolve(strict=True)
         assets = verify_bundle(root)
+        self.device = os.environ.get("M5_DEVICE", "cpu")
+        self.device_id = int(os.environ.get("M5_DEVICE_ID", "0"))
+        if self.device not in ("cpu", "cuda") or self.device_id < 0 or (self.device == "cpu" and self.device_id != 0):
+            raise ValueError("M5_DEVICE 必须为 cpu 或 cuda；M5_DEVICE_ID 必须为非负整数，CPU 使用 0")
+        if self.device == "cuda":
+            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+            if manifest.get("depth_frame_precision", "fp32") != "fp32" or manifest.get("codec_decoder_fast_conv"):
+                raise ValueError("CUDA 请使用原始 FP32、FP32 查表或 FP32 合批模型，不能使用 CPU INT8 模型")
         self.threads = int(os.environ.get("M5_THREADS", "2"))
         batch_mode = os.environ.get("M5_DEPTH_BATCH", "off")
         if batch_mode not in ("on", "off"):
             raise ValueError("M5_DEPTH_BATCH 必须为 on 或 off")
         self.depth_batch = batch_mode == "on"
+        graph_mode = os.environ.get("M5_CUDA_GRAPH", "on")
+        if graph_mode not in ("on", "off"):
+            raise ValueError("M5_CUDA_GRAPH 必须为 on 或 off")
+        self.cuda_graph_enabled = self.device == "cuda" and graph_mode == "on" and not self.depth_batch
         if self.depth_batch and "depth_frame_pair.onnx" not in assets:
             raise ValueError("开启深度合批需要带 depth_frame_pair.onnx 的模型目录")
         self.max_frames = int(os.environ.get("M5_MAX_FRAMES", "1024"))
@@ -83,7 +98,8 @@ class Runtime:
         else:
             text_normalization.normalize_text = lambda text, **kwargs: text
         self.model = M5Onnx(str(root), threads=self.threads, codec_mode="cached",
-                            device="cpu", local_files_only=True)
+                            device=self.device, device_id=self.device_id, local_files_only=True)
+        logging.info("M5 推理设备 device=%s device_id=%d", self.device, self.device_id)
         voice_file = Path(os.environ.get("M5_VOICES_FILE", str(Path(__file__).with_name("voices.json")))).resolve(strict=True)
         definitions = json.loads(voice_file.read_text(encoding="utf-8"))
         if not isinstance(definitions, dict) or not 1 <= len(definitions) <= 64:
@@ -91,7 +107,9 @@ class Runtime:
         self.voices = {}
         identity_voices = {}
         use_int8 = self.model.meta.get("depth_frame_precision") == "int8"
-        self.settings = dict(seed=1234, first_frames=6 if use_int8 else 2, chunk_frames=4, left_context=8)
+        # FP32 首两帧扣除保留尾音后仅有 60 ms，CUDA 首块使用 6 帧正文。
+        self.settings = dict(seed=1234, first_frames=6 if use_int8 or self.device == "cuda" else 2,
+                             chunk_frames=4, left_context=8)
         for name, definition in definitions.items():
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name):
                 raise ValueError(f"音色名称无效: {name}")
@@ -106,6 +124,9 @@ class Runtime:
                          time.perf_counter() - started)
             self.voices[name] = {"wav": str(path), "text": text, "codes": codes, "decoder_prefix": prefix}
             identity_voices[name] = {"audio": digest_file(path), "text": text}
+        if self.device == "cuda":
+            # 全部音色已编码，请求复用 codes；释放只在启动时使用的显存。
+            del self.model.sessions["codec_encoder"]
         self.default_voice = os.environ.get("M5_DEFAULT_VOICE") or next(iter(self.voices))
         if self.default_voice not in self.voices:
             raise ValueError("默认音色不在配置列表中")
@@ -131,8 +152,10 @@ class Runtime:
                 ffmpeg_version = subprocess.run([self.ffmpeg, "-version"], capture_output=True, check=True,
                                                 timeout=5, text=True).stdout.splitlines()[0]
         identity = {
-            "backend": "m5-cpu", "assets": assets, "voices": identity_voices,
+            "backend": "m5-" + self.device, "device_id": self.device_id,
+            "assets": assets, "voices": identity_voices,
             "default_voice": self.default_voice, "threads": self.threads, "depth_batch": self.depth_batch,
+            "cuda_graph": self.cuda_graph_enabled,
             "max_frames": self.max_frames, "settings": self.settings,
             "normalization": self.normalization, "alert_phrases": phrase_mode,
             "ship_parts": self.ship_parts, "number_tail_speed": self.number_tail_speed if self.ship_parts else 1,
@@ -141,9 +164,10 @@ class Runtime:
                        for p in (Path(__file__), Path(__file__).with_name("server.py"),
                                  Path(__file__).with_name("alert_phrases.py"),
                                  Path(__file__).with_name("batching.py"),
+                                 Path(__file__).with_name("cuda_graph.py"),
                                  VENDOR / "infer_onnx.py", VENDOR / "text_normalization.py")},
-            "packages": {name: importlib.metadata.version(name) for name in (
-                "numpy", "onnxruntime", "scipy", "tokenizers", "soundfile")},
+            "packages": {"onnxruntime": ort.__version__, **{name: importlib.metadata.version(name) for name in (
+                "numpy", "scipy", "tokenizers", "soundfile")}},
         }
         if self.normalization:
             identity["normalizer_packages"] = {name: importlib.metadata.version(name)
@@ -168,10 +192,29 @@ class Runtime:
                 self._prepare_alert_phrases()
             logging.info("告警磁盘缓存已启用 path=%s field_cache_mb=%d", directory.resolve(), cache_mb)
         self.model_name = root.name
-        logging.info("M5 CPU 已就绪 identity=%s voices=%s normalization=%s",
+        self.cuda_graph = None
+        if self.cuda_graph_enabled:
+            self.cuda_graph = CudaGraph(self.model)
+            self.model.sessions["depth_frame"] = self.cuda_graph
+            self.model.provider_options["depth_frame"] = self.cuda_graph.session.get_provider_options()
+            logging.info("CUDA 深度生成 Graph 已捕获，工作实例共享权重并独立生成音色")
+        logging.info("M5 已就绪 identity=%s voices=%s normalization=%s",
                      self.identity, list(self.voices), self.normalization)
         if self.ship_parts:
             logging.info("船名前缀复用已启用 number_tail_speed=%s", self.number_tail_speed)
+
+    def fork_cuda(self):
+        """启动时共享 CUDA Session，每个工作实例独立持有生成和解码状态。"""
+        if self.device != "cuda" or self.model.stats.get("status") == "running":
+            raise ValueError("只能从空闲的 CUDA 实例创建工作实例")
+        worker = copy.copy(self)
+        worker.settings = self.settings.copy()
+        worker.model = copy.copy(self.model)
+        worker.model.sessions = self.model.sessions.copy()
+        worker.model.stats = {}
+        worker.model.__dict__.pop("generated_codes", None)
+        worker.model._reset_codec()
+        return worker
 
     def _prepare_alert_phrases(self):
         for voice in self.voices:

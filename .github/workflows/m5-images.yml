@@ -1,9 +1,9 @@
-name: M5 CPU and gateway images
+name: M5 CPU, CUDA and gateway images
 
 on:
   workflow_dispatch:
   push:
-    branches: [main, feat/vllm-omni-backend, feat/m5-cpu-extreme-optimization]
+    branches: [main, feat/vllm-omni-backend, feat/m5-cpu-extreme-optimization, feat/edge-tts]
     paths:
       - .github/workflows/m5-images.yml
       - .dockerignore
@@ -16,6 +16,7 @@ on:
       - pyproject.toml
       - uv.lock
       - compose.m5.yaml
+      - compose.m5.cuda.yaml
       - deploy/Dockerfile.gateway
       - deploy/Dockerfile.m5
 
@@ -36,7 +37,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [m5, gateway]
+        include:
+          - service: m5
+            dockerfile: m5
+            device: cpu
+          - service: m5-cuda
+            dockerfile: m5
+            device: cuda
+          - service: gateway
+            dockerfile: gateway
+            device: cpu
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
@@ -55,7 +65,8 @@ jobs:
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
-          file: deploy/Dockerfile.${{ matrix.service }}
+          file: deploy/Dockerfile.${{ matrix.dockerfile }}
+          build-args: M5_DEVICE=${{ matrix.device }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.tags.outputs.sha }}
@@ -81,7 +92,7 @@ jobs:
           prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
           tag=m5
           if [ "$GITHUB_REF" = refs/heads/main ]; then tag=latest; fi
-          for service in m5 gateway; do
+          for service in m5 m5-cuda gateway; do
             docker buildx imagetools create --tag "$prefix-$service:$tag" "$prefix-$service:sha-$GITHUB_SHA"
           done
-          echo "M5 CPU + gateway ready: TTS_IMAGE_TAG=sha-$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "M5 CPU/CUDA + gateway ready: TTS_IMAGE_TAG=sha-$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"

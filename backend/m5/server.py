@@ -36,6 +36,9 @@ class Service(rpc.InferenceServiceServicer):
     def close(self):
         if self.depth_batcher is not None:
             self.depth_batcher.close()
+        graph = getattr(self.runtime, "cuda_graph", None)
+        if graph is not None:
+            graph.close()
 
     def GetInfo(self, request, context):
         r = self.runtime
@@ -107,10 +110,13 @@ def main():
         raise ValueError("M5_WORKERS 必须为 1 到 32")
     runtimes = []
     for index in range(workers):
-        logging.info("加载 M5 CPU 实例 %d/%d", index + 1, workers)
+        logging.info("加载 M5 推理实例 %d/%d", index + 1, workers)
         phrases = runtimes[0].alert_phrases if runtimes else None
         fields = runtimes[0].field_cache if runtimes else None
-        runtimes.append(Runtime(shared_alert_phrases=phrases, shared_field_cache=fields))
+        if runtimes and runtimes[0].device == "cuda":
+            runtimes.append(runtimes[0].fork_cuda())
+        else:
+            runtimes.append(Runtime(shared_alert_phrases=phrases, shared_field_cache=fields))
     server = grpc.server(ThreadPoolExecutor(max_workers=max(4, workers + 2)),
                          maximum_concurrent_rpcs=workers + 16,
                          options=(("grpc.max_receive_message_length", 65536),
@@ -125,7 +131,7 @@ def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
     server.start()
-    logging.info("M5 gRPC 监听 %s，独立模型实例数 %d", address, workers)
+    logging.info("M5 gRPC 监听 %s，推理实例数 %d", address, workers)
     try:
         stop.wait()
     finally:

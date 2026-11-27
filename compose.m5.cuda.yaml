@@ -1,0 +1,17 @@
+# 与 compose.m5.yaml 一起使用；仅向容器暴露选定的一张 GPU。
+services:
+  m5-backend:
+    image: ${TTS_IMAGE_PREFIX:-tts}-m5-cuda:${TTS_IMAGE_TAG:-latest}
+    build:
+      args:
+        M5_DEVICE: cuda
+    environment:
+      M5_DEVICE: cuda
+      M5_DEVICE_ID: 0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${M5_CUDA_VISIBLE_DEVICE:-0}"]
+              capabilities: [gpu]

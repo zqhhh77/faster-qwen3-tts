@@ -7,6 +7,9 @@ services:
     restart: unless-stopped
     environment:
       M5_MODEL: /models/m5
+      M5_DEVICE: ${M5_DEVICE:-cpu}
+      M5_DEVICE_ID: ${M5_DEVICE_ID:-0}
+      M5_CUDA_GRAPH: ${M5_CUDA_GRAPH:-on}
       M5_THREADS: ${M5_THREADS:-3}
       M5_DEPTH_BATCH: ${M5_DEPTH_BATCH:-off}
       M5_WORKERS: ${M5_WORKERS:-2}

@@ -4,11 +4,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 lib
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-cache
+ARG M5_DEVICE=cpu
+RUN case "$M5_DEVICE" in \
+      cpu) uv sync --frozen --no-dev --no-cache ;; \
+      cuda) uv sync --frozen --no-default-groups --extra cuda --no-cache ;; \
+      *) echo 'M5_DEVICE 必须为 cpu 或 cuda' >&2; exit 1 ;; \
+    esac
 COPY backend/m5/ backend/m5/
 ENV PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH" \
-    M5_MODEL=/models/m5 M5_LISTEN=[::]:50051 M5_TEXT_NORMALIZATION=off
-RUN python -m unittest discover -s backend/m5 -t . -p 'test_*.py' -v
+    M5_MODEL=/models/m5 M5_LISTEN=[::]:50051 M5_TEXT_NORMALIZATION=off M5_DEVICE=${M5_DEVICE}
+RUN M5_DEVICE=cpu python -m unittest discover -s backend/m5 -t . -p 'test_*.py' -v
 EXPOSE 50051
 HEALTHCHECK --interval=10s --timeout=8s --start-period=120s --retries=3 \
     CMD ["python", "-m", "backend.m5.healthcheck"]
